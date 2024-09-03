@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep  3 10:57:06 2024
 
-@author: wang
-"""
 import numpy as np
 import torch
 from scipy.sparse import diags, kron, eye
