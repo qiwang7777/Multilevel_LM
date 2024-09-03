@@ -23,7 +23,7 @@ class LMTR_params_options:
         self.lambda_min = 1e-4 #the minimum of the regularization coefficient
         self.epsilon = 1e-4 #the tolerance of grad_obj
         self.max_iter = 1000 # the maximum of the number of iterations
-        self
+        
         assert 0<eta1<=eta2<1
         assert 0<gamma2<=gamma1<1<gamma3
         assert lambda_min>0
