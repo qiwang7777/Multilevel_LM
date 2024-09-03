@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep  3 09:32:05 2024
 
-@author: Baraldi
-"""
 
 from ROL import Objective
 
@@ -267,6 +261,12 @@ def loss_p(params_nn,regularization=True,lambdap = 0.1):
     total_loss = main_cost_loss + regularization_term
     
     return total_loss
+
+
+
+
+
+
 
 def loss_p_tensor(params_nn,regularization=True,lambdap = 0.1):
    
