@@ -4,12 +4,13 @@ def real_solution_1d(x):
     return torch.sin(x)
 
 class nn_params_options:
-    def __init__(self,input_dim,n_hidden_layers,r_nodes_per_layer,output_dim=1,activation_function=torch.sigmoid):
+    def __init__(self,input_dim,n_hidden_layers,r_nodes_per_layer,output_dim=1,activation_function=torch.sigmoid,sample_num=40):
         self.input_dim = input_dim
         self.n_hidden_layers = n_hidden_layers
         self.r_nodes_per_layer = r_nodes_per_layer
         self.output_dim = 1
         self.activation_function = torch.sigmoid
+        self.sample_num = 40 #in 1d, i.e. input_data = torch.tensor(np.linspace(0,1,sample_num).reshape(sample_num,input_dim), dtype=torch.float32)
         
 
 class LMTR_params_options:
@@ -28,4 +29,3 @@ class LMTR_params_options:
         assert 0<gamma2<=gamma1<1<gamma3
         assert lambda_min>0
         assert epsilon>0 
-
