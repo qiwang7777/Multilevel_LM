@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep  3 15:35:45 2024
 
-@author: wang
-"""
 import numpy as np
 import torch
 import torch.autograd as autograd
