@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep  3 13:51:34 2024
 
-@author: wang
-"""
 from Multilevel_LM.main_lm.PDE_POISSON import PDE
 from Multilevel_LM.main_lm.neural_network_construction import FullyConnectedNN
 
