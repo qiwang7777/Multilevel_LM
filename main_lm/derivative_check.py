@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep  3 10:50:29 2024
 
-@author: wang
-"""
 
 import sympy as sp
 import numpy as np
