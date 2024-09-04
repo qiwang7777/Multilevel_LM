@@ -1,7 +1,6 @@
-
 from Multilevel_LM.main_lm.PDE_POISSON import PDE
 from Multilevel_LM.main_lm.neural_network_construction import FullyConnectedNN
-
+import torch.nn as nn
 import torch
 import numpy as np
 
@@ -84,6 +83,141 @@ def compute_loss(input_data, model, pde, real_solution, lambdak=0.1, regularizat
         
         regularization_term = (torch.norm(real_0 - nn_0)**2 + torch.norm(real_end - nn_end)**2)
         regularization_term = lambdak * 0.5 * regularization_term
+    else:
+        regularization_term = torch.tensor(0.0)
+    
+    # Total loss (torch tensor)
+    total_loss = main_cost_loss + regularization_term
+    
+    return total_loss
+
+pde = PDE((0,1),real_solution_1d) 
+def loss_p(params_nn,regularization=True,lambdap = 0.1):
+   
+    input_dim = 1
+    output_dim = 1
+    n_hidden_layers = 1
+    r_nodes_per_layer = 500
+    activation_function = torch.sigmoid
+    sample_num = 3 #could change
+    x = torch.tensor(np.linspace(0,1,sample_num).reshape(sample_num,input_dim), dtype=torch.float32)
+    model = FullyConnectedNN(input_dim, n_hidden_layers, r_nodes_per_layer, output_dim, activation_function)
+    weights = [
+        params_nn['w1'],          # First hidden layer
+        params_nn['w2']          # Output layer
+    ]
+
+    biases = [
+        params_nn['b1'],  # First hidden layer
+        params_nn['b2']          # Output layer
+    ]
+    with torch.no_grad():
+        # Set weights and biases for the first hidden layer
+        model.hidden_layers[0].weight = nn.Parameter(torch.tensor(weights[0], dtype=torch.float32))
+        model.hidden_layers[0].bias = nn.Parameter(torch.tensor(biases[0], dtype=torch.float32))
+    #
+        # Set weights and biases for the remaining hidden layers
+        for i in range(1, n_hidden_layers):
+            model.hidden_layers[i].weight = nn.Parameter(torch.tensor(weights[i], dtype=torch.float32))
+            model.hidden_layers[i].bias = nn.Parameter(torch.tensor(biases[i], dtype=torch.float32))
+
+        # Set weights and biases for the output layer
+        model.output_layer.weight = nn.Parameter(torch.tensor(weights[-1], dtype=torch.float32))
+        model.output_layer.bias = nn.Parameter(torch.tensor(biases[-1], dtype=torch.float32))
+        
+    grid_points = torch.linspace(0, 1, sample_num, dtype=torch.float32).reshape(-1, 1)
+    inner_sample = sample_num - 2
+    
+    # Compute source term for the real solution (torch tensor)
+    source_term = pde.compute_source_term(grid_points, real_solution_1d).reshape(-1, 1)
+    
+    # Compute model prediction (torch tensor)
+    model_input = torch.tensor(x, dtype=torch.float32).reshape(-1, 1)
+    model_output = model(model_input)
+    
+    # Compute the source term from the model output (torch tensor)
+    NN_source_term = pde.compute_source_term(grid_points, lambda x: model(x)).reshape(-1, 1)
+    
+    # Compute main cost (torch tensor)
+    main_cost = (source_term - NN_source_term)[1:-1]
+    main_cost_loss = 0.5 * torch.norm(main_cost)**2 / inner_sample
+    
+    # Compute regularization term if needed (torch tensor)
+    if regularization==True:
+        real_0 = real_solution_1d(x[0])
+        real_end = real_solution_1d(x[-1])
+        nn_0 = model(model_input[0].reshape(1, -1))
+        nn_end = model(model_input[-1].reshape(1, -1))
+        
+        regularization_term = (torch.norm(real_0 - nn_0)**2 + torch.norm(real_end - nn_end)**2)
+        regularization_term = lambdap * 0.5 * regularization_term
+    else:
+        regularization_term = torch.tensor(0.0)
+    
+    # Total loss (torch tensor)
+    total_loss = main_cost_loss + regularization_term
+    
+    return total_loss
+
+def loss_p_tensor(params_nn,regularization=True,lambdap = 0.1):
+   
+    input_dim = 1
+    output_dim = 1
+    n_hidden_layers = 1
+    r_nodes_per_layer = 5
+    activation_function = torch.sigmoid
+    sample_num = 3 #could change
+    x = torch.tensor(np.linspace(0,1,sample_num).reshape(sample_num,input_dim), dtype=torch.float32)
+    model = FullyConnectedNN(input_dim, n_hidden_layers, r_nodes_per_layer, output_dim, activation_function)
+    weights = [
+        params_nn[0:r_nodes_per_layer].reshape(r_nodes_per_layer,1),          # First hidden layer
+        params_nn[2*r_nodes_per_layer:3*r_nodes_per_layer].reshape(1,r_nodes_per_layer)          # Output layer
+    ]
+
+    biases = [
+        params_nn[r_nodes_per_layer:2*r_nodes_per_layer],  # First hidden layer
+        params_nn[-1]          # Output layer
+    ]
+    with torch.no_grad():
+        # Set weights and biases for the first hidden layer
+        model.hidden_layers[0].weight = nn.Parameter(torch.tensor(weights[0], dtype=torch.float32))
+        model.hidden_layers[0].bias = nn.Parameter(torch.tensor(biases[0], dtype=torch.float32))
+    #
+        # Set weights and biases for the remaining hidden layers
+        for i in range(1, n_hidden_layers):
+            model.hidden_layers[i].weight = nn.Parameter(torch.tensor(weights[i], dtype=torch.float32))
+            model.hidden_layers[i].bias = nn.Parameter(torch.tensor(biases[i], dtype=torch.float32))
+
+        # Set weights and biases for the output layer
+        model.output_layer.weight = nn.Parameter(torch.tensor(weights[-1], dtype=torch.float32))
+        model.output_layer.bias = nn.Parameter(torch.tensor(biases[-1], dtype=torch.float32))
+        
+    grid_points = torch.linspace(0, 1, sample_num, dtype=torch.float32).reshape(-1, 1)
+    inner_sample = sample_num - 2
+    
+    # Compute source term for the real solution (torch tensor)
+    source_term = pde.compute_source_term(grid_points, real_solution_1d).reshape(-1, 1)
+    
+    # Compute model prediction (torch tensor)
+    model_input = torch.tensor(x, dtype=torch.float32).reshape(-1, 1)
+    model_output = model(model_input)
+    
+    # Compute the source term from the model output (torch tensor)
+    NN_source_term = pde.compute_source_term(grid_points, lambda x: model(x)).reshape(-1, 1)
+    
+    # Compute main cost (torch tensor)
+    main_cost = (source_term - NN_source_term)[1:-1]
+    main_cost_loss = 0.5 * torch.norm(main_cost)**2 / inner_sample
+    
+    # Compute regularization term if needed (torch tensor)
+    if regularization==True:
+        real_0 = real_solution_1d(x[0])
+        real_end = real_solution_1d(x[-1])
+        nn_0 = model(model_input[0].reshape(1, -1))
+        nn_end = model(model_input[-1].reshape(1, -1))
+        
+        regularization_term = (torch.norm(real_0 - nn_0)**2 + torch.norm(real_end - nn_end)**2)
+        regularization_term = lambdap * 0.5 * regularization_term
     else:
         regularization_term = torch.tensor(0.0)
     
