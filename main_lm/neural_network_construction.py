@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+In this file, we first gave the construction of fully connected neural network, 
+which has n hidden layers and each hidden layer has r nodes.
+
+Furthermore, we gave the Jacobian function of neural network, 
+i.e. the Jacobian of the network's output w.r.t. the parameters.
+
+And the last function, we gave the Jacobian of any network-related function.
+
+Specially, for the potential usage, we gave the function to calculte the 
+first / second derivative of network w.r.t. the input data x.
+"""
+
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -5,20 +21,20 @@ import numpy as np
 
 
 class FullyConnectedNN(nn.Module):
-    def __init__(self, input_size, n_hidden_layers, r_nodes_per_layer, output_size, activation_function=nn.ReLU()):
+    def __init__(self, input_dim, n_hidden_layers, r_nodes_per_layer, output_dim, activation_function=nn.Sigmoid()):
         super(FullyConnectedNN, self).__init__()
         self.hidden_layers = nn.ModuleList()
         self.activation_function = activation_function
         
         # Input layer (first hidden layer)
-        self.hidden_layers.append(nn.Linear(input_size, r_nodes_per_layer))
+        self.hidden_layers.append(nn.Linear(input_dim, r_nodes_per_layer))
         
         # Additional hidden layers
         for _ in range(1, n_hidden_layers):
             self.hidden_layers.append(nn.Linear(r_nodes_per_layer, r_nodes_per_layer))
         
         # Output layer
-        self.output_layer = nn.Linear(r_nodes_per_layer, output_size)
+        self.output_layer = nn.Linear(r_nodes_per_layer, output_dim)
     
     def forward(self, x):
         for layer in self.hidden_layers:
@@ -77,3 +93,95 @@ class FullyConnectedNN(nn.Module):
 
 # Forward pass through the network
 #output = My_model(input_data)
+
+
+#Function to compute and flatten the gradients of the neural network
+def compute_flatten_gradients_output(model,x):
+    #Forward pass: Perform forward pass to compute network output
+    output = model(x)
+    #Create a vector to store the flattened gradients
+    gradients = []
+    #Loop through each output in the network
+    for i in range(output.size(0)):
+        model.zero_grad() #Zero out the previous gradients
+        output[i].backward(retain_graph = True) #Compute the gradients of the i-th output
+        
+        #Append the gradients of all the parameters (flattened)
+        layer_grads=[]
+        for param in model.parameters():
+            layer_grads.append(param.grad.view(-1)) #Flatten each gradient tensor
+            
+        gradients.append(torch.cat(layer_grads))
+    return torch.stack(gradients) #Stack the gradients for all outputs into a matrix (Jacobian)
+
+
+#Function to compute and flatten the gradients of the function related to neural network w.r.t. the parameters
+
+def compute_flatten_gradients(model,func_nn,x):
+    #Forward pass: Perform forward pass to compute network output
+    output = model(x)
+    #Create a vector to store the flattened gradients
+    gradients = []
+   
+    #Compute the function
+    func = func_nn(model,x)
+    for i in range(func.size(0)):
+        model.zero_grad()
+        func[i].backward(retain_graph=True)
+        #Append the gradients of all the parameters (flattened)
+        layer_grads=[]
+    
+        
+        for param in model.parameters():
+            if param.grad is not None:
+                layer_grads.append(param.grad.view(-1))
+            
+    
+        gradients.append(torch.cat(layer_grads))
+    
+    return torch.stack(gradients)
+
+def nn_x(model,x):
+    x = x.clone().detach().requires_grad_(True)
+    #Forward pass to compute output of the neural network
+    output = model(x)
+    #Compute the first derivative(dy/dx)
+    grad_first, = torch.autograd.grad(outputs=output,inputs=x,grad_outputs=torch.ones_like(output),create_graph = True)
+    
+    return grad_first
+
+
+def nn_xx(model,x):
+    x = x.clone().detach().requires_grad_(True)
+    #Forward pass to compute output of the neural network
+    output = model(x)
+    #Compute the first derivative(dy/dx)
+    grad_first, = torch.autograd.grad(outputs=output,inputs=x,grad_outputs=torch.ones_like(output),create_graph = True)
+    #Compute the second derivative(dy^2/dx^2)
+    grad_second, = torch.autograd.grad(outputs=grad_first,inputs=x,grad_outputs=torch.ones_like(grad_first),create_graph=True)
+    
+    return grad_second
+
+
+#input_dim = 1
+#output_dim = 1
+#n_hidden_layers = 1
+#r_nodes_per_layer = 2
+#model_31 = FullyConnectedNN(input_dim, n_hidden_layers, r_nodes_per_layer, output_dim)
+#x = torch.tensor(np.linspace(0,1,3).reshape(3,input_dim), dtype=torch.float32)
+#print(nn_xx(model_31,x).size(0))
+#print(model_31(x))
+    
+# Function to print model parameters
+#def print_model_parameters(model):
+#    for name, param in model.named_parameters():
+#        print(f"Parameter name: {name}")
+#        print(f"Parameter shape: {param.shape}")
+#        print(f"Parameter value: {param.data}")
+#        print("-" * 50)
+
+# Example usage
+#print("Model parameters:")
+#print_model_parameters(model_31)
+
+#print(compute_flatten_gradients(model_31, nn_xx, x))
