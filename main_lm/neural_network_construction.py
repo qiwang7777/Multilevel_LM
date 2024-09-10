@@ -135,7 +135,9 @@ def compute_flatten_gradients(model,func_nn,x):
         for param in model.parameters():
             if param.grad is not None:
                 layer_grads.append(param.grad.view(-1))
-            
+            if param.grad is None:
+                layer_grads.append(torch.zeros(1))
+            #make sure the length of gradient is same with parameters
     
         gradients.append(torch.cat(layer_grads))
     
