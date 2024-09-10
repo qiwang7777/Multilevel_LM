@@ -90,7 +90,23 @@ def sub_b_solving_poisson(real_solution,model,x,lambdak,regularization=True,lamb
         boundary_num = x.shape[0]-sample_num
     return J1.T@F1/sample_num+lambdap*J2.T@F2/boundary_num
     
-        
+def Taylor_solver(real_solution,model,x,lambdak,s,regularization=True,lambdap=0.1):
+    input_dim = model.hidden_layers[0].in_features
+    F1 = Fk1_solving_poisson(real_solution, model, x)
+    J1 = Jk1_solving_poisson(real_solution, model, x)
+    F2 = Fk2_solving_poisson(real_solution, model, x)
+    J2 = Jk2_solving_poisson(real_solution, model, x)
+    if input_dim == 1:
+        sample_num = x.shape[0]-2
+        boundary_num = 2
+    if input_dim == 2:
+        sample_num = (np.sqrt(x.shape[0])-1)**2 
+        boundary_num = x.shape[0]-sample_num
+    m1 = (torch.norm(F1)**2+2*F1.T@J1@s+s.T@J1.mT@J1@s)/(2*sample_num)
+    m2 = (torch.norm(F2)**2+2*F2.T@J2@s+s.T@J2.mT@J2@s)/(2*boundary_num)
+    m3 = lambdak*torch.norm(s)**2
+    return m1+m2+m3
+
     
     
     
@@ -107,6 +123,7 @@ def sub_b_solving_poisson(real_solution,model,x,lambdak,regularization=True,lamb
 #x_1d = torch.tensor(np.linspace(0,1,5).reshape(5,1), dtype=torch.float32)
 #print(Jk1_solving_poisson(test_func_1d, model_21, x_1d,regularization=True))
 #print(sub_b_solving_poisson(test_func_1d, model_21, x_1d, 0.01))
+#print(Taylor_solver(test_func_1d, model_21, x_1d, 0.1, torch.ones(7)))
 # Example usage for 2D case
 #input_dim_2d = 2
 #output_dim = 1
@@ -130,6 +147,6 @@ def sub_b_solving_poisson(real_solution,model,x,lambdak,regularization=True,lamb
 
 #print(Jk1_solving_poisson(test_func_2d,model_21_2d,x_2d)) 
 #print(sub_b_solving_poisson(test_func_2d, model_21_2d, x_2d, 0.03))    
-    
+#print(Taylor_solver(test_func_2d, model_21_2d, x_2d, 0.03, torch.ones(9)))    
         
     
