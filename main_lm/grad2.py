@@ -5,9 +5,9 @@ import torch
 
 
 #Test for objective loss function
-from Loss_function import compute_loss
+#from Loss_function import compute_loss
 from neural_network_construction import FullyConnectedNN
-from PDE_POISSON import PDE
+from PoissonPDE import PoissonPDE
 import numpy as np
 import torch.nn as nn
 
@@ -33,7 +33,9 @@ class TorchObjective():
 
     def gradient(self, g, x, tol): #should put gradient of model into g
         ans = self.torch_gradient(x)
-        g   = ans.copy()
+        for v in ans:
+          g[v]   = ans[v]
+
 
     def _forward_over_reverse(self, input, x, v):
         # https://github.com/google/jax/blob/main/docs/notebooks/autodiff_cookbook.ipynb
@@ -53,14 +55,12 @@ class TrainingObjective(TorchObjective):
         self.loss = loss
 
     def torch_value(self, x):
-        return self.loss(torch.func.functional_call(self.model, x, self.x), self.y)
-
-
+        temp = torch.func.functional_call(self.model, x, self.x)
+        val = self.loss(temp, self.y)
+        return val
 
 def real_solution_1d(x):
     return torch.sin(x)
-
-
 
 
 def initialize_parameters(model, input_dim,r,init_type = 'he'):
@@ -89,52 +89,46 @@ def initialize_parameters(model, input_dim,r,init_type = 'he'):
 
 
 
-
-
 class Objective_nn_pde(TrainingObjective):
     
     def __init__(self, model, data, pde):
-        super().__init__(model, data, self.loss)
+        loss = torch.nn.MSELoss(reduction='sum') 
+        super().__init__(model, data, loss)
         self.model      = model
         self.x, self.y  = data
         self.pde        = pde
-   
-    def value(self, x, tol):
-        return self.torch_value(x)
-
-    def torch_value(self, x):
-        return self.loss(x)
+         
     
-    def loss(self, params_nn, regularization=False, lambdap = 0.1):
-        # Compute model prediction (torch tensor)
-        #model_output   = model(model_input)
-        model_output   = torch.func.functional_call(self.model, params_nn, self.x)
-        # Compute main cost (torch tensor)
-        main_cost      = (self.y - model_output)[1:-1]
-        main_cost_loss = 0.5 * torch.norm(main_cost)**2 / self.x.shape[0] 
-        
-        # Compute regularization term if needed (torch tensor)
-        if regularization==True:
-            real_0   = real_solution_1d(self.x[0])
-            real_end = real_solution_1d(self.x[-1])
-            nn_0     = self.model(self.x[0].reshape(1, -1))
-            nn_end   = self.model(self.x[-1].reshape(1, -1))
-            
-            regularization_term = (torch.norm(real_0 - nn_0)**2 + torch.norm(real_end - nn_end)**2)
-            regularization_term = lambdap * 0.5 * regularization_term
-        else:
-            regularization_term = torch.tensor(0.0)
-        
-        # Total loss (torch tensor)
-        total_loss = main_cost_loss + regularization_term
-        
-        return total_loss
+   # def loss(self, params_nn, regularization=False, lambdap = 0.1):
+   #     # Compute model prediction (torch tensor)
+   #     #model_output   = model(model_input)
+   #     model_output   = torch.func.functional_call(self.model, params_nn, self.x)
+   #     # Compute main cost (torch tensor)
+   #     main_cost      = (self.y - model_output)[1:-1]
+   #     main_cost_loss = 0.5 * torch.norm(main_cost)**2 / self.x.shape[0] 
+   #     
+   #     # Compute regularization term if needed (torch tensor)
+   #     if regularization==True:
+   #         real_0   = real_solution_1d(self.x[0])
+   #         real_end = real_solution_1d(self.x[-1])
+   #         nn_0     = self.model(self.x[0].reshape(1, -1))
+   #         nn_end   = self.model(self.x[-1].reshape(1, -1))
+   #         
+   #         regularization_term = (torch.norm(real_0 - nn_0)**2 + torch.norm(real_end - nn_end)**2)
+   #         regularization_term = lambdap * 0.5 * regularization_term
+   #     else:
+   #         regularization_term = torch.tensor(0.0)
+   #     
+   #     # Total loss (torch tensor)
+   #     total_loss = main_cost_loss + regularization_term
+   #     
+   #     return total_loss
 
 
 def check_first_deriv(obj, x, g, d):
 
     tolerances          = np.array([1., 1.e-1, 1.e-2, 1.e-3, 1.e-4, 1.e-5, 1.e-6, 1.e-7, 1.e-8, 1.e-9, 1.e-10])
-    
+   
     obj.gradient(g, x, 0.) #compute gradient 
     DirDiff = 0.   #compute dot prod (probably standardize this?)
     for v in g: 
@@ -142,21 +136,22 @@ def check_first_deriv(obj, x, g, d):
 
     fx = obj.value(x, 0.) 
 
-
-    print(' t    g\'*d   (f(x+td) - f(x))/t   err\n')
+    print(' t         g\'*d          (f(x+td) - f(x))/t        err     ||t*d||\n')
     
     for t in tolerances:
      
       with torch.no_grad():
         newx = x.copy()
+        temp = 0.
         for v in newx:  #again probably standardize +/- for ordered dicts
-          newx[v] = t*d[v] + x[v]
+          newx[v] = x[v] +  t*d[v]
+          temp += torch.norm(newx[v] - x[v])**2
 
       fxt    = obj.value(newx, 0.)
       fd_est = (fxt - fx)/t
 
       err    = DirDiff - fd_est
-      print(t, ' ', DirDiff.item(), '  ', fd_est.item(), '   ', torch.norm(err).item())
+      print('{:.3e}  {:.3e}  {:.3e}  {:.3e} {:.3e} '.format(t, DirDiff.item(), fd_est.item(),  torch.norm(err).item(),  temp.item()))
 
 #Test for function compute_first_derivative
 #print(compute_first_derivative(My_model, input_data))
@@ -192,23 +187,23 @@ def main():
    model               = FullyConnectedNN(input_dim, n_hidden_layers, r_nodes_per_layer, output_dim, activation_function)
   
    #Compute source term for the real solution (torch tensor)
-   pde                 = PDE((0,1),real_solution_1d) 
-   y                   = pde.compute_source_term(x, real_solution_1d).reshape(-1, 1)
+   pde                 = PoissonPDE(real_solution_1d, x) 
+   y                   = pde._compute_1d_source_term(x).reshape(-1, 1)
    #y                   = real_solution_1d(x)  
    
    data                = (x,y) 
    obj_nn_pde          = Objective_nn_pde(model, data, pde)
    param_test          = initialize_parameters(model, 1, 5)
    dvec                = param_test.copy()
-   
+   g_nn_pde            = param_test.copy() 
    with torch.no_grad():
      for v in dvec:
-       dvec[v] = torch.rand(dvec[v].shape)
+       dvec[v] = 5.*torch.rand(dvec[v].shape)
+       g_nn_pde[v] = torch.rand(dvec[v].shape)
 
    value              = obj_nn_pde.value(param_test, 0.)
+   
    #Calculate gradient
-   with torch.no_grad():
-     g_nn_pde = dvec.copy() 
    check_first_deriv(obj_nn_pde, param_test, g_nn_pde, dvec)
 
 
