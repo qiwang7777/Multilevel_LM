@@ -39,7 +39,7 @@ class FullyConnectedNN(nn.Module):
     def forward(self, x):
         for layer in self.hidden_layers:
             x = self.activation_function(layer(x))
-        x = self.output_layer(x)
+            x = self.output_layer(x)
         return x
   
     

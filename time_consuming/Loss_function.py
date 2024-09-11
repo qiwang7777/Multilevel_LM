@@ -3,6 +3,7 @@
 """
 Created on Tue Sep  3 13:51:34 2024
 
+<<<<<<< Updated upstream:time_consuming/Loss_function.py
 @author: wang
 """
 from Multilevel_LM.time_consuming.PDE_POISSON import PDE
