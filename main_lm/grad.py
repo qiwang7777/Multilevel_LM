@@ -201,7 +201,7 @@ def main():
     input_dim = 1
     output_dim = 1
     n_hidden_layers = 1
-    r_nodes_per_layer = 2
+    r_nodes_per_layer = 1
     activation_function = torch.sigmoid
     sample_num = 3
     x = torch.tensor(np.linspace(0,1,sample_num).reshape(sample_num, input_dim), dtype=torch.float32, requires_grad=True)
