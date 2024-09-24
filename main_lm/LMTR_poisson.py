@@ -1,4 +1,4 @@
-from Multilevel_LM.main_lm.test import LMTR_params_options
+from Multilevel_LM.main_lm.params_options import LMTR_params_options
 from Multilevel_LM.main_lm.loss_poisson import loss_solving_poisson,compute_loss_gradients
 from Multilevel_LM.main_lm.subsolver_poisson import Taylor_solver,sub_A_solving_poisson,sub_b_solving_poisson
 import torch
