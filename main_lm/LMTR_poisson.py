@@ -77,7 +77,7 @@ def LMTR_solving_poisson(real_solution,model,x,lambdak,regularization=True,lambd
     max_iter = 100
     k=0
     while torch.norm(compute_loss_gradients(real_solution,model,x,regularization=True,lambdap = 0.1))>=epsilon and k<=max_iter:
-        print(torch.norm(compute_loss_gradients(real_solution,model,x,regularization=True,lambdap = 0.1))) 
+        #print(torch.norm(compute_loss_gradients(real_solution,model,x,regularization=True,lambdap = 0.1))) 
         
         A = sub_A_solving_poisson(real_solution,model,x,lambdak)
         #check the reason why CG didn't converge
