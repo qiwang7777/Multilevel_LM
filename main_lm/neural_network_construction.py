@@ -23,6 +23,12 @@ import numpy as np
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, n_hidden_layers, r_nodes_per_layer, output_dim, activation_function=nn.Sigmoid()):
         super(FullyConnectedNN, self).__init__()
+        self.input_dim = input_dim
+        self.n_hidden_layers = n_hidden_layers
+        self.r_nodes_per_layer = r_nodes_per_layer
+        self.output_dim = output_dim
+        
+        
         self.hidden_layers = nn.ModuleList()
         self.activation_function = activation_function
         
@@ -39,7 +45,7 @@ class FullyConnectedNN(nn.Module):
     def forward(self, x):
         for layer in self.hidden_layers:
             x = self.activation_function(layer(x))
-            x = self.output_layer(x)
+        x = self.output_layer(x)
         return x
   
     
