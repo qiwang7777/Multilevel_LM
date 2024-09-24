@@ -104,7 +104,7 @@ def Taylor_solver(real_solution,model,x,lambdak,s,regularization=True,lambdap=0.
         boundary_num = x.shape[0]-sample_num
     m1 = (torch.norm(F1)**2+2*F1.T@J1@s+s.T@J1.mT@J1@s)/(2*sample_num)
     m2 = (torch.norm(F2)**2+2*F2.T@J2@s+s.T@J2.mT@J2@s)/(2*boundary_num)
-    m3 = lambdak*torch.norm(s)**2/2
+    m3 = 0.5*lambdak*torch.norm(s)**2
     return m1+m2+m3
 
     
