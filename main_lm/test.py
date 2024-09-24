@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import torch
 
 
@@ -66,3 +63,9 @@ ax.set_ylabel('Y axis')
 ax.set_zlabel('Model Output')
 fig.colorbar(surf_model, ax=ax, shrink=0.5, aspect=10)
 plt.show()
+    
+
+
+
+  
+    
