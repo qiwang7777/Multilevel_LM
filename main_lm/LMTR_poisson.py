@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep 10 14:40:45 2024
-
-@author: wang
-"""
 from Multilevel_LM.main_lm.test import LMTR_params_options
 from Multilevel_LM.main_lm.loss_poisson import loss_solving_poisson,compute_loss_gradients
 from Multilevel_LM.main_lm.subsolver_poisson import Taylor_solver,sub_A_solving_poisson,sub_b_solving_poisson
@@ -13,7 +6,6 @@ import copy
 from scipy.sparse.linalg import cg, LinearOperator,splu
 import numpy as np
 from scipy.sparse import csc_matrix
-
 
 
 
@@ -154,20 +146,3 @@ def LMTR_solving_poisson(real_solution,model,x,lambdak,regularization=True,lambd
             
         k+=1
     return model(x)
-    
-    
-#Test
-#def test_func_1d(x):
-#    return torch.sin(x)
-#from Multilevel_LM.main_lm.neural_network_construction import FullyConnectedNN
-#input_dim = 1
-#output_dim = 1
-#n_hidden_layers = 1
-#r_nodes_per_layer = 20
-#model_21 = FullyConnectedNN(input_dim, n_hidden_layers, r_nodes_per_layer, output_dim)
-#x_1d = torch.tensor(np.linspace(0,1,5).reshape(5,1), dtype=torch.float32)
-#print(test_func_1d(x_1d))
-#print(model_21(x_1d))
-#print(LMTR_solving_poisson(test_func_1d, model_21, x_1d,0.1,regularization=True))    
-        
-    
