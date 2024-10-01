@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Sep 24 15:10:48 2024
 
-@author: wang
-"""
 import math
 import torch
 import torch.nn as nn
