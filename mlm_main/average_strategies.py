@@ -91,6 +91,40 @@ def average_nodes_model(model,m):
 
     
     return new_model
+
+
+
+
+# The transformation_matrix between old model and new model
+#First we give the restriction matrix, i.e. from Fine case to coarse case
+
+
+def restriction(model,m):
+    """
+    Create a transformation matrix that averages 'm' rows from the old weight 
+    matrix to produce the new weight matrix.
+    
+    Args:
+        old_size (int): Number of nodes in the old layer (rows in weight matrix)
+        new_size (int): Number of nodes in the new layer (rows in weight matrix)
+        m (int): Number of old nodes averaged to form a new node.
+
+    Returns
+    -------
+    T (torch.Tensor): The transformation matrix of size (new_model_size,model_size)
+
+    """
+    old_size = model.r_nodes_per_layer
+    new_size = math.ceil(model.r_nodes_per_layer/m)
+    T = torch.zeros((new_size,old_size))
+    #Fill in the transformation matrix by averaging blocks of 'm' rows
+    for i in range(new_size):
+        start_idx = i*m
+        end_idx = min(start_idx+m,old_size)
+        T[i,start_idx:end_idx] = 1.0/(end_idx-start_idx)
+        
+    return T
+
                 
                 
                     
