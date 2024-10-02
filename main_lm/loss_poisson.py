@@ -22,7 +22,7 @@ def get_2d_boundary(x):
     return boundary_points
 
 def loss_solving_poisson(real_solution,model,x,regularization=True,lambdap = 0.1):
-    input_dim = model.hidden_layers[0].in_features
+    input_dim = model.input_dim
     
     if input_dim == 1:
         pde_1d = PoissonPDE(real_solution,x)
