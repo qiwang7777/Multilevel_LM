@@ -29,6 +29,26 @@ class LMTR_params_options:
         assert 0<gamma2<=gamma1<1<gamma3
         assert lambda_min>0
         assert epsilon>0 
+
+
+class MLM_TR_params_options:
+    def __init__(self,eta1=0.1,eta2=0.75,gamma1=0.85,gamma2=0.5,gamma3=1.5,lambda_min=1e-4,epsilon = 1e-4,kappaH = 0.1,epsilonH = 1e-4,max_iter=1000):
+        self.eta1 = 0.1 #pho successful 
+        self.eta2 = 0.75 #pho very successful
+        self.gamma1 = 0.85 #step is successful but not very successful,shrink the regularization coefficient (lambda0)
+        self.gamma2 = 0.5 #step is very successful, shrink the regularization coefficient(lambda0)
+        self.gamma3 = 1.5 #step failed, increase regularization coefficient(lambda0)
+        #self.lambdak = 0.05 #initial value of the regularization coefficient
+        self.lambda_min = 1e-4 #the minimum of the regularization coefficient
+        self.epsilon = 1e-4 #the tolerance of grad_obj
+        self.kappaH = 0.1 #torch.norm(R*grad_fh) >= kappaH*torch.norm(grad_fh)
+        self.epsilonH = 1e-4 #torch.norm(R*grad_fh) > epsilonH
+        self.max_iter = 1000 # the maximum of the number of iterations
+        
+        assert 0<eta1<=eta2<1
+        assert 0<gamma2<=gamma1<1<gamma3
+        assert lambda_min>0
+        assert epsilon>0 
         
 
 
