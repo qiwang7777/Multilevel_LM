@@ -44,9 +44,28 @@ def create_block_matrix_torch(R, m):
     return block_matrix
 
 
+def Taylor_H(real_solution,model,x,sH,m=2,regularization=True,lambdap=0.1):
+    input_dim = model.input_dim
+    sH.requires_grad_(True)
+    new_model = average_nodes_model(model,m)
+    new_model_s = update_model_parameters(new_model, sH)[1]
+    R = restriction(model,m)
+    if input_dim == 1 and model.n_hidden_layers == 1:
+        R_extend = create_block_matrix_torch(R,3)
+    elif input_dim == 2 and model.n_hidden_layers == 1:
+        R_extend = create_block_matrix_torch(R,4)
+    fHs = loss_solving_poisson(real_solution,new_model_s,x, regularization=True,lambdap=0.1)
+    #sH.grad=True
+    #fHs.backward()
+    #print(sH.grad)
+    grad_fh = compute_loss_gradients(real_solution, model, x,regularization=True,lambdap=0.1)
+    grad_fH = compute_loss_gradients(real_solution, new_model, x)
+    return fHs+(R_extend@grad_fh-grad_fH).T@sH
+    
 
 
-def Taylor_H(real_solution,model,x,lambdak,sH,m=2,regularization=True,lambdap=0.1):
+
+def Taylor_H_re(real_solution,model,x,lambdak,sH,m=2,regularization=True,lambdap=0.1):
     input_dim = model.input_dim
     new_model = average_nodes_model(model,m)
     new_model_s = update_model_parameters(new_model, sH)[1]
