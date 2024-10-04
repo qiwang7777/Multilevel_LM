@@ -87,8 +87,16 @@ def average_nodes_model(model,m):
                 new_model.hidden_layers[i].weight.data =  weights
                 new_model.hidden_layers[i].bias.data = biases
                 previous_out_features = new_model.hidden_layers[i].out_features
+                
+    #Adjust the output layer weights and keep the output weight as the original model
+    output_weights = model.output_layer.weight.data
+    output_weights_avg = output_weights[:,:floormm].view(1,-1,m).mean(dim=2)
+    if remain>0 :
+        output_weights_end = output_weights[:,floormm:].mean(dim=1,keepdim=True)
+        output_weights_avg = torch.cat((output_weights_avg,output_weights_end))
+    new_model.output_layer.weight.data = output_weights_avg
+    new_model.output_layer.bias.data = model.output_layer.bias.data
  
-
     
     return new_model
 
