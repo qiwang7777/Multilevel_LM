@@ -60,9 +60,10 @@ def alpha_solver(xk,x0,s,deltak):
     
 
 
-def SPG_TR_subsolver(xk,f,phi,grad_f,Bk,tauk,lambdak,deltak,maxit=10,tau_bar=1e-5,tmin=1e-30,tmax=1e30):
+def SPG_TR_subsolver(xk,f,phi,grad_f,Bk,tauk,lambdak,deltak,maxit=1,tau_bar=1e-5,tmin=1e-30,tmax=1e30):
     l=0
     x0 = xk
+    tk0 = lambdak
     hk0 = hk(x0,grad_f(f,x0),prox_l1,lambdak)
     hkl = hk(xk,grad_f(f,xk),prox_l1,lambdak)
     while l<maxit and hkl>min(tau_bar,tauk*hk0) and np.linalg.norm(xk-x0,2)<deltak:
@@ -84,7 +85,7 @@ def SPG_TR_subsolver(xk,f,phi,grad_f,Bk,tauk,lambdak,deltak,maxit=10,tau_bar=1e-
         dk = dk+alpha*b
         phik = phi(xk)
         if kappa<=0:
-            lambda_bar = tk/np.linalg.norm(dk,2)
+            lambda_bar = tk0/np.linalg.norm(dk,2)
         else:
             lambda_bar = np.dot(s,s)/kappa
             
