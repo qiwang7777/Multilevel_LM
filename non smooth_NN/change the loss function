@@ -1,0 +1,287 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from fenics import *
+
+# Parameters for neural network and FEniCS setup
+input_dim = 3 * 32 * 32  # Flattened input size (3 channels, 32x32 grid)
+output_dim = 32 * 32     # Flattened output size (32x32 grid)
+hidden_neurons = 400     # Neurons in hidden layers
+batch_size = 64          # Batch size for training
+epochs = 50              # Number of training epochs
+learning_rate = 0.001    # Learning rate
+
+# Neural Network Architecture (Fully Connected NN)
+class FullyConnectedNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(FullyConnectedNN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.activation = nn.Sigmoid()
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)  # Flatten input
+        x = self.activation(self.fc1(x))
+        x = self.activation(self.fc2(x))
+        x = self.fc3(x)
+        
+        x = x.view(-1, 32, 32)
+        return x
+
+# Generate data using FEniCS
+def generate_fenics_data(n_samples=10000):
+    # Generate random values for kx, ky, ax, ay, and alpha
+    kx_samples = np.random.uniform(0.5, 4.0, n_samples)
+    ky_samples = np.random.uniform(0.5, 4.0, n_samples)
+    ax_samples = np.random.uniform(0.0, 0.5, n_samples)
+    ay_samples = np.random.uniform(0.0, 0.5, n_samples)
+    alpha_samples = np.random.uniform(0.0, np.pi / 2, n_samples)
+
+    # Mesh grid for x, y (32x32)
+    mesh = UnitSquareMesh(31, 31)
+    V = FunctionSpace(mesh, "Lagrange", 1)
+
+    # Boundary condition
+    u_D = Constant(0.0)
+    bc = DirichletBC(V, u_D, "on_boundary")
+
+    # Prepare containers for inputs and outputs
+    inputs = []
+    outputs = []
+
+    for i in range(n_samples):
+        kx = kx_samples[i]
+        ky = ky_samples[i]
+        ax = ax_samples[i]
+        ay = ay_samples[i]
+        alpha = alpha_samples[i]
+
+        # Define rotated coordinates x' and y'
+        kappa = Expression(
+            "1.1 + cos(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax)) * "
+            "cos(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))",
+            degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
+        )
+        
+        # Source term
+        f = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
+        
+        # Define variational problem
+        u = TrialFunction(V)
+        v = TestFunction(V)
+        a = dot(kappa * grad(u), grad(v)) * dx
+        L = f * v * dx
+        
+        # Solve the problem
+        u_sol = Function(V)
+        solve(a == L, u_sol, bc)
+
+        # Get the solution as a numpy array
+        u_array = u_sol.compute_vertex_values(mesh)
+        u_array = u_array.reshape(32, 32)  
+
+        # Stack kappa, f, and mesh coordinates as input
+        # Create the mesh grid coordinates
+        X, Y = np.meshgrid(np.linspace(0, 1, 32), np.linspace(0, 1, 32))  # Correct the grid to 32x32
+
+        # Stack the kappa, f, X, and Y as input features
+        input_features = np.stack([kappa.compute_vertex_values(mesh), f.compute_vertex_values(mesh), X.flatten(), Y.flatten()], axis=0)
+        input_features = input_features[:3, :32*32].reshape(3, 32, 32)
+        inputs.append(input_features)
+        outputs.append(u_array)
+
+    # Convert to tensors
+    inputs = torch.tensor(np.array(inputs), dtype=torch.float32)
+    outputs = torch.tensor(np.array(outputs), dtype=torch.float32)
+
+    return inputs, outputs
+
+# Load Dataset
+def load_data(n_samples=10000):
+    inputs, outputs = generate_fenics_data(n_samples)
+    dataset = TensorDataset(inputs, outputs)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# Training Loop
+def train_model(model, dataloader, criterion, optimizer):
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+        for inputs, targets in dataloader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            
+            kappa = inputs[:,0:1,:,:]
+            f = inputs[:,1:2,:,:]
+            loss = criterion(model,inputs,kappa,f)
+
+            # Forward pass
+            #outputs = model(inputs)
+            #targets = targets.view(-1, 32, 32) 
+            #loss = criterion(outputs, targets)
+
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss / len(dataloader):.4f}")
+    
+#Loss function
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = FullyConnectedNN(input_dim, hidden_neurons, output_dim)
+model = model.to(device)
+inputs = torch.rand((1,3,32,32),requires_grad=True,device=device)
+outputs = model(inputs)
+
+import torch.nn as nn
+
+def pde_loss(model, inputs, kappa, f, lambda_reg = 0.01):
+    """
+    Custom loss function for the PDE: -∇⋅(κ∇u) = f
+    
+    Args:
+    - model: The neural network model
+    - inputs: The input tensor (batch_size, 3, 32, 32), with the first channel as κ(x, y), 
+              the second channel as f(x, y), and the third channel as the spatial grid (x, y)
+    - kappa: The diffusivity tensor κ(x, y) (batch_size, 1, 32, 32)
+    - f: The source term tensor f(x, y) (batch_size, 1, 32, 32)
+
+    Returns:
+    - loss: The computed MSE loss of the PDE residuals and the MSE loss of the boundary residuals, 
+            plus the reguralization term, which is the l1 norm of params of NN
+    """
+    # Forward pass to get the solution u
+    inputs = inputs.requires_grad_()
+    u = model(inputs)
+
+    # Ensure gradients can be computed w.r.t. inputs
+    u = u.requires_grad_()
+    #print(inputs.requires_grad)  # Should be True
+    #print(u.requires_grad)  # Should be True after setting
+
+
+    # Compute gradients of u with respect to x and y
+    grad_u = torch.autograd.grad(
+        outputs=u, inputs=inputs, grad_outputs=torch.ones_like(u), 
+        create_graph=True, only_inputs=True
+    )[0]
+    #print(grad_u.shape)
+    
+    
+    grad_u_x = grad_u[:, :, :, 0]
+    grad_u_y = grad_u[:, :, :, 1]
+    #print(kappa.shape) #Shape [64,1,32,32]
+    #print(grad_u_x.shape) # Shape [64,3,32]
+    kappa_expanded = kappa.expand(-1, 3, -1, -1)  # Expand kappa to match the gradient directions
+    kappa_expanded = kappa_expanded.squeeze(2)  # Remove the singleton dimension
+    # Compute κ∇u for each direction
+    kappa_grad_u_x = kappa_expanded * grad_u_x.unsqueeze(3)  # Element-wise multiplication
+
+    kappa_grad_u_y = kappa_expanded * grad_u_y.unsqueeze(3)
+    
+    # Compute divergence ∇⋅(κ∇u)
+    div_kappa_grad_u = torch.autograd.grad(
+        outputs=kappa_grad_u_x.sum() + kappa_grad_u_y.sum(), inputs=inputs,
+        grad_outputs=torch.ones_like(kappa_grad_u_x.sum() + kappa_grad_u_y.sum()),
+        create_graph=True, only_inputs=True
+    )[0]
+    
+    div_kappa_grad_u_x = div_kappa_grad_u[:, :, :, 0]
+    div_kappa_grad_u_y = div_kappa_grad_u[:, :, :, 1]
+    
+    div_kappa_grad_u = div_kappa_grad_u_x + div_kappa_grad_u_y # Shape [64,3,32]
+    div_kappa_grad_u_expanded = div_kappa_grad_u.unsqueeze(2)  # Shape [64, 3, 32, 1]
+    div_kappa_grad_u_expanded = div_kappa_grad_u_expanded.expand(-1, -1, 32, -1)  # Shape [64, 3, 32, 32]
+    f_expanded = f.expand(-1, 3, -1, -1)  # Shape [64, 3, 32, 32]
+
+    
+    # PDE residual: -∇⋅(κ∇u) - f
+    #print(div_kappa_grad_u.shape)
+    #print(f.shape) # Shape [64,1,32,32]
+    residual = -div_kappa_grad_u_expanded - f_expanded
+    loss_pde = torch.mean(residual**2)
+    # Boundary residual
+    boundary_mask = (inputs[:, 2, 0, :] == 0) | (inputs[:, 2, -1, :] == 1) | (inputs[:, 2, :, 0] == 0) | (inputs[:, 2, :, -1] == 1)
+    boundary_values = u[boundary_mask]  # Extract the boundary points
+    #print(boundary_values) # which supposed to be 0, but actually it was not, around [1e-3,1e-5]
+    loss_boundary = torch.mean(boundary_values**2) 
+    
+    # Reguralization
+    loss_reg = lambda_reg * sum(param.abs().sum() for param in model.parameters())
+    # Compute the loss 
+    
+    loss = loss_pde+loss_boundary+loss_reg
+    
+    return loss
+
+#def pde_loss(model,inputs,f,kappa,lambda_reg=0.01):
+    
+
+# Main Script
+if __name__ == "__main__":
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load data
+    dataloader = load_data()
+    
+    # Initialize the model, loss, and optimizer
+    model = FullyConnectedNN(input_dim, hidden_neurons, output_dim).to(device)
+    criterion = pde_loss 
+    
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    
+
+    # Train the model
+    train_model(model,dataloader,criterion,optimizer)
+    # Save the model
+    torch.save(model.state_dict(), "fully_connected_nn.pth")
+    print("Model training complete and saved!")
+
+
+#print(generate_fenics_data(10000)[0].shape)
+#print(generate_fenics_data(10000)[1].shape)       
+import matplotlib.pyplot as plt
+
+# Function to plot the exact solution and NN learned solution
+def plot_comparison(model, dataloader, index=0):
+    model.eval()
+    
+    # Get one batch of data
+    inputs, targets = next(iter(dataloader))
+    inputs = inputs.to(device)
+    targets = targets.to(device)
+    
+    # Get the model's prediction for the input at the given index
+    prediction = model(inputs).cpu().detach().numpy()
+    exact_solution = targets.cpu().detach().numpy()
+    
+    # Select a specific sample from the batch for visualization
+    exact_u = exact_solution[index].reshape(32, 32)
+    predicted_u = prediction[index].reshape(32, 32)
+    
+    # Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Exact solution
+    im1 = axes[0].imshow(exact_u, cmap='viridis', origin='lower', extent=[0, 1, 0, 1])
+    axes[0].set_title("Exact Solution")
+    fig.colorbar(im1, ax=axes[0])
+    
+    # NN predicted solution
+    im2 = axes[1].imshow(predicted_u, cmap='viridis', origin='lower', extent=[0, 1, 0, 1])
+    axes[1].set_title("NN Predicted Solution")
+    fig.colorbar(im2, ax=axes[1])
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_comparison(model, dataloader, index=0)
