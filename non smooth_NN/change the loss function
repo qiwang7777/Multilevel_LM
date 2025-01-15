@@ -187,25 +187,27 @@ def pde_loss(model, inputs, kappa, f, lambda_reg = 0.01):
     kappa_grad_u_y = kappa_expanded * grad_u_y.unsqueeze(3)
     
     # Compute divergence ∇⋅(κ∇u)
-    div_kappa_grad_u = torch.autograd.grad(
-        outputs=kappa_grad_u_x.sum() + kappa_grad_u_y.sum(), inputs=inputs,
-        grad_outputs=torch.ones_like(kappa_grad_u_x.sum() + kappa_grad_u_y.sum()),
-        create_graph=True, only_inputs=True
-    )[0]
+    div_kappa_grad_u_x = torch.autograd.grad(
+        outputs=kappa_grad_u_x.sum(dim=[2,3]), inputs=inputs,
+        grad_outputs=torch.ones_like(kappa_grad_u_x.sum(dim=[2,3])),
+        create_graph=True, only_inputs=True)[0]
+
+    div_kappa_grad_u_y = torch.autograd.grad(
+        outputs=kappa_grad_u_y.sum(dim=[2,3]), inputs=inputs,
+        grad_outputs=torch.ones_like(kappa_grad_u_y.sum(dim=[2,3])),
+        create_graph=True, only_inputs=True)[0]
     
-    div_kappa_grad_u_x = div_kappa_grad_u[:, :, :, 0]
-    div_kappa_grad_u_y = div_kappa_grad_u[:, :, :, 1]
-    
-    div_kappa_grad_u = div_kappa_grad_u_x + div_kappa_grad_u_y # Shape [64,3,32]
-    div_kappa_grad_u_expanded = div_kappa_grad_u.unsqueeze(2)  # Shape [64, 3, 32, 1]
-    div_kappa_grad_u_expanded = div_kappa_grad_u_expanded.expand(-1, -1, 32, -1)  # Shape [64, 3, 32, 32]
+    div_kappa_grad_u = div_kappa_grad_u_x + div_kappa_grad_u_y # Shape [64,3,32,32]
+    #print(div_kappa_grad_u.shape)
+    #div_kappa_grad_u_expanded = div_kappa_grad_u.unsqueeze(2)  # Shape [64, 3, 32, 1]
+    #div_kappa_grad_u_expanded = div_kappa_grad_u_expanded.expand(-1, -1, 32, -1)  # Shape [64, 3, 32, 32]
     f_expanded = f.expand(-1, 3, -1, -1)  # Shape [64, 3, 32, 32]
 
     
     # PDE residual: -∇⋅(κ∇u) - f
     #print(div_kappa_grad_u.shape)
     #print(f.shape) # Shape [64,1,32,32]
-    residual = -div_kappa_grad_u_expanded - f_expanded
+    residual = -div_kappa_grad_u - f_expanded
     loss_pde = torch.mean(residual**2)
     # Boundary residual
     boundary_mask = (inputs[:, 2, 0, :] == 0) | (inputs[:, 2, -1, :] == 1) | (inputs[:, 2, :, 0] == 0) | (inputs[:, 2, :, -1] == 1)
