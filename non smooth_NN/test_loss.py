@@ -5,6 +5,7 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 import torch
 from dolfin import *
+import torch.optim as optim
 
 def generate_fenics_data(n_samples=100, meshsize = 31):
     # Generate random values for kx, ky, ax, ay, and alpha
@@ -157,6 +158,7 @@ class FullyConnectedNN(nn.Module):
 input_dim = 2
 output_dim = 1
 hidden_dim = 400
+epochs = 50   
 model = FullyConnectedNN(input_dim, hidden_dim, output_dim)
 #Loss function
 #PDE residual, for the pde residual part, we need the laplacian_nn and also the gradient of nn
@@ -166,7 +168,7 @@ def grad_nn(model,inputs):
     inputs = inputs.clone().detach().requires_grad_(True)
     
     outputs = model(inputs).squeeze(0)
-    print(outputs.shape)
+    
     
     if outputs.shape[1] != 1:
         raise ValueError("The output of model must be a scalar (shape [batch_size,1]).")
@@ -197,7 +199,7 @@ def laplacian_nn(model,inputs):
 #inputs_domain = generate_fenics_data(n_samples=10,meshsize=4)[0]  
 
 
-def loss_pde(model,n_samples=10,meshsize = 3,reg_param=0.01):
+def loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01):
     
     inputs_domain = generate_fenics_data(n_samples,meshsize)[0]
     inputs_domain = inputs_domain.requires_grad_()
@@ -239,4 +241,94 @@ def loss_pde(model,n_samples=10,meshsize = 3,reg_param=0.01):
     
     return loss
 
-print(loss_pde(model,n_samples=10,meshsize = 3,reg_param=0.01))
+print(loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01))
+# Training Loop
+def train_model(model, optimizer):
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+
+        loss = loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01)
+
+            # Forward pass
+            #outputs = model(inputs)
+            #targets = targets.view(-1, 32, 32) 
+            #loss = criterion(outputs, targets)
+
+            # Backward pass and optimization
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss:.4f}")
+
+# Main Script
+if __name__ == "__main__":
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Initialize the model, loss, and optimizer
+    model = FullyConnectedNN(input_dim, hidden_dim, output_dim).to(device)
+    
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    
+
+    # Train the model
+    train_model(model,optimizer)
+    # Save the model
+    torch.save(model.state_dict(), "fully_connected_nn.pth")
+    print("Model training complete and saved!")
+
+
+      
+import matplotlib.pyplot as plt
+
+def plot_comparison(model, n_samples=1, meshsize=31):
+    # Generate data for a single sample
+    inputs_domain, real_solution, _, _, _, _, _ = generate_fenics_data(n_samples=n_samples, meshsize=meshsize)
+    
+    # Pass inputs_domain through the trained model to get predictions
+    predicted_solution = model(inputs_domain).detach().numpy()
+    
+    # Convert solutions into 2D grids
+    real_solution_grid = real_solution.squeeze(0).reshape(meshsize - 1, meshsize - 1).numpy()
+    predicted_solution_grid = predicted_solution.reshape(meshsize - 1, meshsize - 1)
+    
+    # Compute error (absolute difference)
+    error_grid = abs(real_solution_grid - predicted_solution_grid)
+    
+    # Plot real solution, predicted solution, and error
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Real solution
+    ax = axes[0]
+    im = ax.imshow(real_solution_grid, extent=[0, 1, 0, 1], origin="lower", cmap="viridis")
+    ax.set_title("Real Solution (FEniCS)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.colorbar(im, ax=ax)
+    
+    # Predicted solution
+    ax = axes[1]
+    im = ax.imshow(predicted_solution_grid, extent=[0, 1, 0, 1], origin="lower", cmap="viridis")
+    ax.set_title("Predicted Solution (NN)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.colorbar(im, ax=ax)
+    
+    # Error
+    ax = axes[2]
+    im = ax.imshow(error_grid, extent=[0, 1, 0, 1], origin="lower", cmap="plasma")
+    ax.set_title("Error (|Real - Predicted|)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.colorbar(im, ax=ax)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage after training the model
+plot_comparison(model, n_samples=1, meshsize=31)
