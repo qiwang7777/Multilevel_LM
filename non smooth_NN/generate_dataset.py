@@ -4,6 +4,7 @@ from fenics import *
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 import torch
+from dolfin import *
 
 def generate_fenics_data(n_samples=100, meshsize = 31):
     # Generate random values for kx, ky, ax, ay, and alpha
@@ -28,6 +29,7 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
     outputs_boundary = []
     kappa_value_list = []
     f_value_list = []
+    kappa_grad_list = []
 
     # Create vertex coordinates for mapping
     vertex_coords = mesh.coordinates()
@@ -54,6 +56,12 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
             "cos(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))",
             degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
         )
+        # Define the gradient as a vector function
+        kappa_func = project(kappa,V)
+        vector_space = VectorFunctionSpace(mesh, "CG", 1)
+        grad_kappa = project(as_vector([kappa_func.dx(0), kappa_func.dx(1)]), vector_space)
+        
+
         
         # Source term
         f = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
@@ -71,13 +79,16 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
         # Get the solution and input features
         u_array = u_sol.compute_vertex_values(mesh)
         kappa_values = kappa.compute_vertex_values(mesh)
+        grad_kappa_values = grad_kappa.compute_vertex_values(mesh).reshape(-1, 2)
       
         
         f_values = f.compute_vertex_values(mesh)
         kappa_domain = kappa_values[domain_mask]
         f_domain = f_values[domain_mask]
+        grad_kappa_domain = grad_kappa_values[domain_mask,:]
         kappa_value_list.append(kappa_domain)
         f_value_list.append(f_domain)
+        kappa_grad_list.append(grad_kappa_domain)
         outputs_domain.append(u_array[domain_mask])
         outputs_boundary.append(u_array[boundary_mask])
 
@@ -98,12 +109,13 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
 
     # Convert to tensors
     
-    inputs_domain = torch.tensor(np.array(inputs_domain), dtype=torch.float32)
+    inputs_domain = torch.tensor(np.array(inputs_domain), dtype=torch.float32).squeeze(0)
     outputs_domain = torch.tensor(np.array(outputs_domain), dtype=torch.float32).unsqueeze(-1)
-    inputs_boundary = torch.tensor(np.array(inputs_boundary), dtype=torch.float32)
+    inputs_boundary = torch.tensor(np.array(inputs_boundary), dtype=torch.float32).squeeze(0)
     outputs_boundary = torch.tensor(np.array(outputs_boundary), dtype=torch.float32).unsqueeze(-1)
+    kappa_grad_list = torch.tensor(np.array(kappa_grad_list), dtype=torch.float32)
     kappa_value_list = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
     f_value_list= torch.tensor(np.array(f_value_list), dtype=torch.float32)
     
 
-    return inputs_domain, outputs_domain, inputs_boundary, outputs_boundary, kappa_value_list, f_value_list
+    return inputs_domain, outputs_domain, inputs_boundary, outputs_boundary, kappa_value_list, f_value_list, kappa_grad_list
