@@ -1,0 +1,242 @@
+#In this file, we generate the dataset, input dimension is 2 (spatial data in 2d) and output dimension is 1
+#To get all the values we need to put into loss function, including the value of kappa and f.
+from fenics import *
+import numpy as np
+from torch.utils.data import DataLoader, TensorDataset
+import torch
+from dolfin import *
+
+def generate_fenics_data(n_samples=100, meshsize = 31):
+    # Generate random values for kx, ky, ax, ay, and alpha
+    kx_samples = np.random.uniform(0.5, 4.0, n_samples)
+    ky_samples = np.random.uniform(0.5, 4.0, n_samples)
+    ax_samples = np.random.uniform(0.0, 0.5, n_samples)
+    ay_samples = np.random.uniform(0.0, 0.5, n_samples)
+    alpha_samples = np.random.uniform(0.0, np.pi / 2, n_samples)
+
+    # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
+    mesh = UnitSquareMesh(meshsize, meshsize)
+    V = FunctionSpace(mesh, "Lagrange", 1)
+
+    # Boundary condition
+    u_D = Constant(0.0)
+    bc = DirichletBC(V, u_D, "on_boundary")
+
+    # Prepare containers for inputs and outputs
+    inputs_domain = []
+    outputs_domain = []
+    inputs_boundary = []
+    outputs_boundary = []
+    kappa_value_list = []
+    f_value_list = []
+    kappa_grad_list = []
+
+    # Create vertex coordinates for mapping
+    vertex_coords = mesh.coordinates()
+    x_coords = vertex_coords[:, 0]
+    
+    y_coords = vertex_coords[:, 1]
+
+    # Define masks for boundary and domain
+    boundary_mask = (np.isclose(x_coords, 0) | np.isclose(x_coords, 1) | 
+                     np.isclose(y_coords, 0) | np.isclose(y_coords, 1))
+    domain_mask = ~boundary_mask
+
+    for i in range(n_samples):
+        kx = kx_samples[i]
+        ky = ky_samples[i]
+        ax = ax_samples[i]
+        ay = ay_samples[i]
+        alpha = alpha_samples[i]
+        
+
+        # Define rotated coordinates x' and y'
+        kappa = Expression(
+            "1.1 + cos(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax)) * "
+            "cos(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))",
+            degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
+        )
+        # Define the gradient as a vector function
+        kappa_func = project(kappa,V)
+        vector_space = VectorFunctionSpace(mesh, "CG", 1)
+        grad_kappa = project(as_vector([kappa_func.dx(0), kappa_func.dx(1)]), vector_space)
+        
+
+        
+        # Source term
+        f = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
+        
+        # Define variational problem
+        u = TrialFunction(V)
+        v = TestFunction(V)
+        a = dot(kappa * grad(u), grad(v)) * dx
+        L = f * v * dx
+        
+        # Solve the problem
+        u_sol = Function(V)
+        solve(a == L, u_sol, bc)
+
+        # Get the solution and input features
+        u_array = u_sol.compute_vertex_values(mesh)
+        kappa_values = kappa.compute_vertex_values(mesh)
+        grad_kappa_values = grad_kappa.compute_vertex_values(mesh).reshape(-1, 2)
+      
+        
+        f_values = f.compute_vertex_values(mesh)
+        kappa_domain = kappa_values[domain_mask]
+        f_domain = f_values[domain_mask]
+        grad_kappa_domain = grad_kappa_values[domain_mask,:]
+        kappa_value_list.append(kappa_domain)
+        f_value_list.append(f_domain)
+        kappa_grad_list.append(grad_kappa_domain)
+        outputs_domain.append(u_array[domain_mask])
+        outputs_boundary.append(u_array[boundary_mask])
+
+    # Separate domain and boundary data (only consider spatial data)
+    input_domain_features = np.stack([x_coords[domain_mask],y_coords[domain_mask]], axis=-1)
+    inputs_domain.append(input_domain_features)
+    
+        
+        
+
+    input_boundary_features = np.stack([x_coords[boundary_mask],y_coords[boundary_mask]], axis=-1)
+    inputs_boundary.append(input_boundary_features)
+        
+    
+        
+        
+        
+
+    # Convert to tensors
+    
+    inputs_domain = torch.tensor(np.array(inputs_domain), dtype=torch.float32).squeeze(0)
+    outputs_domain = torch.tensor(np.array(outputs_domain), dtype=torch.float32).unsqueeze(-1)
+    inputs_boundary = torch.tensor(np.array(inputs_boundary), dtype=torch.float32).squeeze(0)
+    outputs_boundary = torch.tensor(np.array(outputs_boundary), dtype=torch.float32).unsqueeze(-1)
+    kappa_grad_list = torch.tensor(np.array(kappa_grad_list), dtype=torch.float32)
+    kappa_value_list = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
+    f_value_list= torch.tensor(np.array(f_value_list), dtype=torch.float32)
+    
+
+    return inputs_domain, outputs_domain, inputs_boundary, outputs_boundary, kappa_value_list, f_value_list, kappa_grad_list
+
+#Size of the results from function generate_fenics_data
+#inputs_domain : spatial data (x,y) with size of [1,(meshsize-1)**2,2], there are (meshsize-1)**2 points in interior and the spatial data is in 2d
+#outputs_domain: u(x,y) when (x,y) is in (0,1)^2, whose size is [n_samples,(meshsize-1)**2,1] as kappa would change with the different samples
+#inputs_boundary: spatial data (x,y) with size of [n_samples,(meshsize+1)**2-(meshsize-1)**2,2], there are (meshsize+1)**2-(meshsize-1)**2 points in boundary
+#outputs_boundary: u(x,y) when (x,y) in on the boundary, whose size is [n_samples,(meshsize+1)**2-(meshsize-1)**2,1]
+#kappa_value_list: the value of kappa(kx,ky,ax,ay,alpha,x,y), here only consider when (x,y) is in (0,1)^2
+#f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
+
+#Load data
+def load_data(n_samples=100, meshsize = 31, batchsize = 64):
+    inputs_domain = generate_fenics_data(n_samples=100, meshsize = 31)[0]
+    outputs_domain = generate_fenics_data(n_samples=100, meshsize = 31)[1]
+    dataset = TensorDataset(inputs_domain,outputs_domain)
+    return DataLoader(dataset, batchsize = batchsize, shuffle=True)
+
+# Fully connected neural network construction
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FullyConnectedNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(FullyConnectedNN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.activation = nn.Sigmoid() #changable
+
+    def forward(self, x):
+        x = self.activation(self.fc1(x))
+        x = self.activation(self.fc2(x))
+        x = self.fc3(x)
+        return x
+    
+input_dim = 2
+output_dim = 1
+hidden_dim = 400
+model = FullyConnectedNN(input_dim, hidden_dim, output_dim)
+#Loss function
+#PDE residual, for the pde residual part, we need the laplacian_nn and also the gradient of nn
+
+def grad_nn(model,inputs):
+    
+    inputs = inputs.clone().detach().requires_grad_(True)
+    
+    outputs = model(inputs).squeeze(0)
+    print(outputs.shape)
+    
+    if outputs.shape[1] != 1:
+        raise ValueError("The output of model must be a scalar (shape [batch_size,1]).")
+    gradients = torch.autograd.grad(outputs,inputs,grad_outputs=torch.ones_like(outputs),create_graph = True)[0]
+    return gradients
+
+def hessian_nn(model,inputs):
+    inputs = inputs.clone().detach().requires_grad_(True)
+    inputs_num = inputs.shape[0]
+    hessian = torch.zeros(inputs_num,2,2,dtype=torch.float32)
+    outputs = model(inputs)
+    gradients = torch.autograd.grad(outputs, inputs, grad_outputs=torch.ones_like(outputs), create_graph=True)[0]
+    for i in range(2):
+        grad_i = gradients[:, i]
+        # Calculate the second-order derivatives with respect to the inputs
+        second_gradients = torch.autograd.grad(grad_i, inputs, grad_outputs=torch.ones_like(grad_i), create_graph=True)[0]
+        # Store the second-order derivatives in the Hessian matrix
+        hessian[:, i, :] = second_gradients
+
+    return hessian
+
+def laplacian_nn(model,inputs):
+    hessian = hessian_nn(model,inputs)
+    laplacian = hessian[:, 0, 0] + hessian[:, 1, 1]
+    return laplacian
+    
+
+#inputs_domain = generate_fenics_data(n_samples=10,meshsize=4)[0]  
+
+
+def loss_pde(model,n_samples=10,meshsize = 3,reg_param=0.01):
+    
+    inputs_domain = generate_fenics_data(n_samples,meshsize)[0]
+    inputs_domain = inputs_domain.requires_grad_()
+    inputs_boundary = generate_fenics_data(n_samples,meshsize)[2]
+    
+    
+    
+    nn_domain = model(inputs_domain)
+    nn_boundary = model(inputs_boundary)
+    
+    #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
+    nn_grad = grad_nn(model,inputs_domain)
+    kappa_grad = generate_fenics_data(n_samples,meshsize)[6]
+    grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',kappa_grad,nn_grad)
+
+    
+    kappa_domain = generate_fenics_data(n_samples, meshsize)[4]
+    nn_laplacian = laplacian_nn(model,inputs_domain)
+    kappa_laplacian_nn = kappa_domain*nn_laplacian
+    
+    
+    f_domain = generate_fenics_data(n_samples, meshsize)[5]
+    
+    
+    pde_residual = -grad_kappa_grad_nn - kappa_laplacian_nn -f_domain
+    
+
+    loss_pde = torch.mean(pde_residual**2)
+    
+    #boundary residual
+    
+    loss_boundary = torch.mean(nn_boundary**2)
+    
+    #reguralization
+    loss_reg = reg_param * sum(param.abs().sum() for param in model.parameters())
+    
+    loss = loss_pde+loss_boundary+loss_reg
+    
+    
+    return loss
+
+print(loss_pde(model,n_samples=10,meshsize = 3,reg_param=0.01))
