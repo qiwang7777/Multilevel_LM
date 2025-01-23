@@ -45,7 +45,7 @@ def generate_fenics_data(n_samples=10000, meshsize = 31):
         ax = ax_samples[i]
         ay = ay_samples[i]
         alpha = alpha_samples[i]
-        print(alpha)
+        
 
         # Define rotated coordinates x' and y'
         kappa = Expression(
@@ -70,7 +70,7 @@ def generate_fenics_data(n_samples=10000, meshsize = 31):
         # Get the solution and input features
         u_array = u_sol.compute_vertex_values(mesh)
         kappa_values = kappa.compute_vertex_values(mesh)
-        print(kappa_values.shape)
+        
         
         f_values = f.compute_vertex_values(mesh)
 
@@ -82,7 +82,7 @@ def generate_fenics_data(n_samples=10000, meshsize = 31):
         inputs_domain.append(input_domain_features)
         outputs_domain.append(u_array[domain_mask])
         kappa_domain = kappa_values[domain_mask]
-        print(kappa_domain.shape)
+        
         f_domain = f_values[domain_mask]
         
 
