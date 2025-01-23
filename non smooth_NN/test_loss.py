@@ -243,12 +243,13 @@ def loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01):
 
 print(loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01))
 # Training Loop
-def train_model(model, optimizer):
+def train_model(model,optimizer,n_samples=10,meshsize=31,reg_param=0.01):
     model.train()
     for epoch in range(epochs):
         total_loss = 0
 
         loss = loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01)
+        data_num = n_samples*(meshsize+1)*(meshsize+1)
 
             # Forward pass
             #outputs = model(inputs)
@@ -262,7 +263,7 @@ def train_model(model, optimizer):
 
         total_loss += loss.item()
 
-    print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss:.4f}")
+    print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss/data_num:.4f}")
 
 # Main Script
 if __name__ == "__main__":
