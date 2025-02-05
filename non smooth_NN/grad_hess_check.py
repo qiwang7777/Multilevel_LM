@@ -1,5 +1,5 @@
 import numpy as np
-import sympy as sp
+#import sympy as sp
 
 def gradient(f, x):
     batch_size, input_dim = x.shape
