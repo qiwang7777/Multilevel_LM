@@ -2,56 +2,44 @@ import numpy as np
 import sympy as sp
 
 def gradient(f, x):
-    n = len(x)
-    symbols = sp.symbols(f'x:{n}')  # Create symbolic variables x0, x1, ..., x(n-1)
+    batch_size, input_dim = x.shape
+    gradients =[]
+    for i in range(batch_size):
+        x_sample = x[i].clone().detach().requires_grad_(True)
+        output = f(x_sample)
+        if output.numel() > 1:
+            raise ValueError("The function output must be scalar for gradient computation.")
+        
 
-    # Wrap f to handle symbolic inputs
-    def f_wrapper(*args):
-        if isinstance(args[0], sp.Basic):  # Check if symbolic variables are passed
-            return sum(arg**2 for arg in args)  # Equivalent to ||x||_2^2 symbolically
-        else:
-            return f(np.array(args))  # Use original f for numerical inputs
+    
+        first_grad = torch.autograd.grad(output, x_sample, create_graph=True)[0]
+        gradients.append(first_grad)
 
-    # Convert the wrapped function to symbolic form
-    f_symbolic = f_wrapper(*symbols)
-
-    # Compute the symbolic gradient
-    grad_symbolic = [sp.diff(f_symbolic, xi) for xi in symbols]
-
-    # Convert the symbolic gradient to a numerical function
-    grad_func = sp.lambdify(symbols, grad_symbolic, 'numpy')
-
-    # Evaluate the gradient at the given point x
-    grad = np.array(grad_func(*x), dtype=float)
-    return grad
+    return torch.stack(gradients)
 
 
 def hessian(f, x):
-    n = len(x)
-    symbols = sp.symbols(f'x:{n}')  # Create symbolic variables x0, x1, ..., x(n-1)
-
-    # Wrap f to handle symbolic inputs
-    def f_wrapper(*args):
-        if isinstance(args[0], sp.Basic):  # Check if symbolic variables are passed
-            return sum(arg**2 for arg in args)  # Equivalent to ||x||_2^2 symbolically
-        else:
-            return f(np.array(args))  # Use original f for numerical inputs
-
-    # Convert the wrapped function to symbolic form
-    f_symbolic = f_wrapper(*symbols)
-
-    # Compute the gradient symbolically
-    grad_symbolic = [sp.diff(f_symbolic, xi) for xi in symbols]
-
-    # Compute the Hessian symbolically
-    hessian_symbolic = [[sp.diff(gi, xj) for xj in symbols] for gi in grad_symbolic]
-
-    # Convert the symbolic Hessian to a numerical function
-    hess_func = sp.lambdify(symbols, hessian_symbolic, 'numpy')
-
-    # Evaluate the Hessian at the given point x
-    hess = np.array(hess_func(*x), dtype=float)
-    return hess
+    batch_size, input_dim = x.shape
+    hessians = []
+    for i in range(batch_size):
+        x_sample = x[i].clone().detach().requires_grad_(True)
+        output = f(x_sample)
+        
+        if output.numel() > 1:
+            raise ValueError("The function output must be scalar for Hessian computation.")
+            
+        first_grads = torch.autograd.grad(output,x_sample,create_graph=True)[0]
+        
+        hessian = torch.zeros(input_dim,input_dim,dtype=x_sample.dtype,device=x_sample.device)
+        
+        for j in range(input_dim):
+            second_grads = torch.autograd.grad(first_grads[j],x_sample,create_graph=True)[0]
+            hessian[j,:] = second_grads.view(-1)
+            
+        hessians.append(hessian)
+        
+    return torch.stack(hessians)
+    
 
 def gradient_check(f, grad_func, x, epsilon=1e-6):
     """
