@@ -61,30 +61,37 @@ def gradient_check(f, grad_func, x, epsilon=1e-6):
     bool
         True if the gradient matches numerically within a tolerance, False otherwise.
     """
-    x = np.array(x, dtype=float)
-    n = len(x)
-
-    # Compute numerical gradient using finite differences
-    numerical_grad = np.zeros(n)
-    for i in range(n):
-        x_forward = x.copy()
-        x_backward = x.copy()
-        x_forward[i] += epsilon
-        x_backward[i] -= epsilon
-        numerical_grad[i] = (f(x_forward) - f(x_backward)) / (2 * epsilon)
-
-    # Compute analytical gradient
-    analytical_grad = grad_func(f, x)
-
-    # Compare numerical and analytical gradients
-    if np.allclose(numerical_grad, analytical_grad, atol=1e-5):
+    
+    if not torch.is_tensor(x):
+        raise ValueError("Input x must be a torch.Tensor.")
+    
+    batch_size,input_dim = x.shape
+    numerical_grad = torch.zeros_like(x)
+    for i in range(batch_size):
+        for j in range(input_dim):
+            x_forward = x[i].clone().detach()
+            x_backward = x[i].clone().detach()
+            x_forward[j] += epsilon
+            x_backward[i] -= epsilon
+            
+            f_forward = f(x_forward)
+            f_backward = f(x_backward)
+            
+            if f_forward.numel()>1 or f_backward.numel()>1:
+                raise ValueError("The function output must be scalar for gradient computation.")
+                
+            numerical_grad[i,j] = (f_forward-f_backward)/(2*epsilon)
+            
+    analytical_grad = grad_func(f,x)
+    if torch.allclose(numerical_grad,analytical_grad,atol=1e-5):
         print("Gradient check passed")
         return True
     else:
         print("Gradient check failed")
-        print("Numerical Gradient:", numerical_grad)
-        print("Analytical Gradient:", analytical_grad)
+        print("Numerical Gradient:\n", numerical_grad)
+        print("Analytical Gradient:\n", analytical_grad)
         return False
+                
     
 
     
