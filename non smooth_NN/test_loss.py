@@ -31,6 +31,7 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
     kappa_value_list = []
     f_value_list = []
     kappa_grad_list = []
+    u_solution_list = []
 
     # Create vertex coordinates for mapping
     vertex_coords = mesh.coordinates()
@@ -110,6 +111,8 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
         kappa_value_list.append(kappa_domain)
         f_value_list.append(f_domain)
         kappa_grad_list.append(grad_kappa_domain)
+        u_solution_list.append(u_array)
+        
         #outputs_domain.append(u_array[domain_mask])
         #outputs_boundary.append(u_array[boundary_mask])
 
@@ -137,9 +140,10 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
     kappa_grad_list = torch.tensor(np.array(kappa_grad_list), dtype=torch.float32)
     kappa_value_list = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
     f_value_list= torch.tensor(np.array(f_value_list), dtype=torch.float32)
+    u_solution_tensor = torch.tensor(np.array(u_solution_list),dtype=torch.float32)
     
 
-    return  kappa_value_list, f_value_list, kappa_grad_list
+    return  kappa_value_list, f_value_list, kappa_grad_list, u_solution_tensor
 #Size of the results from function generate_fenics_data
 #inputs_domain : spatial data (x,y) with size of [1,(meshsize-1)**2,2], there are (meshsize-1)**2 points in interior and the spatial data is in 2d
 #outputs_domain: u(x,y) when (x,y) is in (0,1)^2, whose size is [n_samples,(meshsize-1)**2,1] as kappa would change with the different samples
@@ -147,6 +151,8 @@ def generate_fenics_data(n_samples=100, meshsize = 31):
 #outputs_boundary: u(x,y) when (x,y) in on the boundary, whose size is [n_samples,(meshsize+1)**2-(meshsize-1)**2,1]
 #kappa_value_list: the value of kappa(kx,ky,ax,ay,alpha,x,y), here only consider when (x,y) is in (0,1)^2
 #f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
+
+
 
 def input_data(meshsize=31):
     mesh = UnitSquareMesh(meshsize, meshsize)
@@ -156,6 +162,10 @@ def input_data(meshsize=31):
     boundary_mask = (np.isclose(x_coords, 0) | np.isclose(x_coords, 1) | 
                      np.isclose(y_coords, 0) | np.isclose(y_coords, 1))
     domain_mask = ~boundary_mask
+    inputs = []
+    inputs_features = np.stack([x_coords,y_coords], axis=-1)
+    inputs.append(inputs_features)
+    inputs = torch.tensor(np.array(inputs), dtype=torch.float32).squeeze(0)
     inputs_domain = []
     input_domain_features = np.stack([x_coords[domain_mask],y_coords[domain_mask]], axis=-1)
     inputs_domain.append(input_domain_features)
@@ -164,13 +174,9 @@ def input_data(meshsize=31):
     input_boundary_features = np.stack([x_coords[boundary_mask],y_coords[boundary_mask]], axis=-1)
     inputs_boundary.append(input_boundary_features)
     inputs_boundary = torch.tensor(np.array(inputs_boundary), dtype=torch.float32).squeeze(0)
-    return inputs_domain,inputs_boundary
+    return inputs_domain,inputs_boundary,inputs
 
-#Load data
-def load_data(n_samples=100, meshsize=31, batchsize=64):
-    inputs_domain, outputs_domain, _, _, _, _, _ = generate_fenics_data(n_samples=n_samples, meshsize=meshsize)
-    dataset = TensorDataset(inputs_domain, outputs_domain)
-    return DataLoader(dataset, batch_size=batchsize, shuffle=True)
+
 
 # Fully connected neural network construction
 import torch
@@ -325,15 +331,15 @@ import matplotlib.pyplot as plt
 
 def plot_comparison(model, n_samples=1, meshsize=31):
     # Generate data for a single sample
-    inputs_domain, _ = input_data(meshsize)
-    real_solution = generate_fenics_data(n_samples=n_samples, meshsize=meshsize)[0]
+    inputs_domain, inputs_boundary, inputs = input_data(meshsize)
+    real_solution = generate_fenics_data(n_samples=n_samples, meshsize=meshsize)[3]
     
     # Pass inputs_domain through the trained model to get predictions
     predicted_solution = model(inputs_domain).detach().numpy()
     
     # Convert solutions into 2D grids
-    real_solution_grid = real_solution.squeeze(0).reshape(meshsize - 1, meshsize - 1).numpy()
-    predicted_solution_grid = predicted_solution.reshape(meshsize - 1, meshsize - 1)
+    real_solution_grid = real_solution.squeeze(0).reshape(meshsize + 1, meshsize + 1).numpy()
+    predicted_solution_grid = predicted_solution.reshape(meshsize + 1, meshsize + 1)
     
     # Compute error (absolute difference)
     error_grid = abs(real_solution_grid - predicted_solution_grid)
