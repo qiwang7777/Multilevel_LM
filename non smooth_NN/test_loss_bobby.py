@@ -338,6 +338,29 @@ def plot_comparison(model, PDEObj, n_samples=1):
     plt.tight_layout()
     plt.show()
 
+def loss_hessian(model, PDEObj, reg_param = 0.01):
+    params = list(model.parameters())
+    flat_params = torch.cat([p.view(-1) for p in params])
+    n_params = flat_params.size(0)
+    loss = PDEObj.loss(model)
+
+    #Intialize the Hessian matrix
+    hessian = torch.zeros((n_params,n_params))
+    print(hessian.size())
+    #Compute first-order gradients
+    grads = torch.autograd.grad(loss,params,create_graph=True)
+    flat_grads = torch.cat([g.view(-1) for g in grads])
+
+    #Compute second-order derivatives
+    for i in range(n_params):
+        if i % 100 == 0 : print(i)
+        #Compute secod-order gradient of the i-th first-order gradient
+        second_grads = torch.autograd.grad(flat_grads[i],params,retain_graph=True)
+        flat_second_grads = torch.cat([g.view(-1) for g in second_grads])
+        print(flat_second_grads.size(), hessian[i].size())
+        hessian[i] = flat_second_grads
+
+    return hessian
 
 # Main Script
 if __name__ == "__main__":
@@ -355,10 +378,12 @@ if __name__ == "__main__":
     # Initialize the model, loss, and optimizer
     model     = FullyConnectedNN(input_dim, hidden_dim, output_dim).to(device)
 
+    model_small = FullyConnectedNN(input_dim, 30, output_dim)
+
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     PDEObj    = PDEObjective(n_samples=10,meshsize=31,reg_param=0.0)
-
+    print(loss_hessian(model_small, PDEObj).shape)
 
 
     # Train the model
