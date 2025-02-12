@@ -129,7 +129,6 @@ class PDEObjective:
         ax_samples    = np.random.uniform(0.0, 0.5, self.nsamps)
         ay_samples    = np.random.uniform(0.0, 0.5, self.nsamps)
         alpha_samples = np.random.uniform(0.0, np.pi / 2, self.nsamps)
-        print('up here')
 
         # Source term
         f = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
@@ -225,16 +224,16 @@ class PDEObjective:
         #f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
 
 
-    def loss(self, model):
+    def loss(self):
         # print('in loss')
         # inputs_domain = input_data(meshsize)[0]
         inputs_domain = self.inputs_domain.requires_grad_()
         # inputs_boundary = input_data(meshsize)[1]
 
         # nn_domain = model(inputs_domain)
-        nn_boundary = model(self.inputs_boundary)
+        nn_boundary = self.model(self.inputs_boundary)
         #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
-        nn_grad = grad_nn(model, inputs_domain)
+        nn_grad = grad_nn(self.model, inputs_domain)
         # kappa_grad = generate_fenics_data(n_samples,meshsize)[2]
         kappa_grad         = self.kappa_grad_list
         grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',kappa_grad, nn_grad)
@@ -269,7 +268,8 @@ class PDEObjective:
 # Training Loop
 def train_model(model,optimizer,obj):
 
-    model.train()
+    # model.train()
+    # x = list(model.parameters())
     for epoch in range(epochs):
         total_loss = 0
         # loss = loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01)
@@ -338,29 +338,103 @@ def plot_comparison(model, PDEObj, n_samples=1):
     plt.tight_layout()
     plt.show()
 
-def loss_hessian(model, PDEObj, reg_param = 0.01):
-    params = list(model.parameters())
-    flat_params = torch.cat([p.view(-1) for p in params])
-    n_params = flat_params.size(0)
-    loss = PDEObj.loss(model)
+# Flatten the model's parameters into a single vector
+# def flatten_parameters(model):
+  #  return torch.cat([param.view(-1) for param in model.parameters()])
 
-    #Intialize the Hessian matrix
-    hessian = torch.zeros((n_params,n_params))
-    print(hessian.size())
-    #Compute first-order gradients
-    grads = torch.autograd.grad(loss,params,create_graph=True)
-    flat_grads = torch.cat([g.view(-1) for g in grads])
+# import copy
+# # Unflatten the new parameters and update the model, then return the updated model
+# def update_model_parameters(model, s):
+#    model_new = copy.deepcopy(model)
+#    # Flatten the current model parameters
+#    flattened_params = flatten_parameters(model_new)
 
-    #Compute second-order derivatives
-    for i in range(n_params):
-        if i % 100 == 0 : print(i)
-        #Compute secod-order gradient of the i-th first-order gradient
-        second_grads = torch.autograd.grad(flat_grads[i],params,retain_graph=True)
-        flat_second_grads = torch.cat([g.view(-1) for g in second_grads])
-        print(flat_second_grads.size(), hessian[i].size())
-        hessian[i] = flat_second_grads
+#    # Add the current flattened parameters to s
+#    new_flattened_params = flattened_params + s
 
-    return hessian
+#    # Get the iterator for the model's parameters
+#    param_iterator = iter(model_new.parameters())
+
+#    # Initialize the current position in the 'new_flattened_params' tensor
+#    current_pos = 0
+
+#    # Update each parameter in the model
+#    for param in param_iterator:
+#        # Get the size of the current parameter
+#        num_param_elements = param.numel()
+
+#        # Extract the corresponding part of 'new_flattened_params' and reshape it to match the param's shape
+#        new_param = new_flattened_params[current_pos:current_pos + num_param_elements].view(param.size())
+
+#        # Update the parameter without affecting gradients
+#        with torch.no_grad():
+#            param.copy_(new_param)
+
+#        # Move the current position forward
+#        current_pos += num_param_elements
+
+#    # Return the updated model
+#    return  model, model_new
+
+
+# def hessian_s(model,s):
+
+#     def f(params):
+
+#         s=params-flatten_parameters(model)
+
+#         model_new=update_model_paramters(model,s)
+
+#         loss=PDEObj.loss(model)
+
+#         return loss
+
+
+#     flatten_params=flatten_parameters(model)
+
+
+#     return torch.autograd.functional.hvp(f, flatten_params,s, create_graph=True)
+
+import copy
+def loss_hessian(PDEObj, reg_param = 0.01):
+    x = model.state_dict()
+    v = copy.deepcopy(x) #just to get something to multiply against
+
+    for key, vals in v.items():
+       v[key] = vals.copy_(torch.randn(vals.size()))
+
+    valfunc = PDEObj.loss(torch.func.functional_call(PDEObj.model, x, ()))
+    torch_gradient = torch.func.grad(valfunc)
+
+    def forwardoverrev(input, x, v):
+        return torch.func.jvp(input, (x,), (v,))
+
+    def hessVec(v, x):
+        _, ans = forwardoverrev(torch_gradient, x, v)
+        return ans
+
+    return hessVec(v, x)
+    # params = list(model.parameters())
+    # flat_params = torch.cat([p.view(-1) for p in params])
+    # n_params = flat_params.size(0)
+    # loss = PDEObj.loss(model)
+
+    # #Intialize the Hessian matrix
+    # hessian = torch.zeros((n_params,n_params))
+    # print(hessian.size())
+    # #Compute first-order gradients
+    # grads = torch.autograd.grad(loss,params,create_graph=True)
+    # flat_grads = torch.cat([g.view(-1) for g in grads])
+
+    # #Compute second-order derivatives
+    # for i in range(n_params):
+    #     if i % 100 == 0 : print(i)
+    #     #Compute secod-order gradient of the i-th first-order gradient
+    #     second_grads = torch.autograd.grad(flat_grads[i],params,retain_graph=True)
+    #     flat_second_grads = torch.cat([g.view(-1) for g in second_grads])
+    #     hessian[i] = flat_second_grads
+
+    # return hessian
 
 # Main Script
 if __name__ == "__main__":
@@ -378,12 +452,13 @@ if __name__ == "__main__":
     # Initialize the model, loss, and optimizer
     model     = FullyConnectedNN(input_dim, hidden_dim, output_dim).to(device)
 
-    model_small = FullyConnectedNN(input_dim, 30, output_dim)
+    model_small = FullyConnectedNN(input_dim, 40, output_dim)
 
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     PDEObj    = PDEObjective(n_samples=10,meshsize=31,reg_param=0.0)
-    print(loss_hessian(model_small, PDEObj).shape)
+    PDEObj.model = model_small
+    print(loss_hessian(PDEObj).shape)
 
 
     # Train the model
