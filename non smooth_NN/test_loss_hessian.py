@@ -223,36 +223,44 @@ class PDEObjective:
         #f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
 
     def loss_temp(self, x, nn_grad, nn_laplacian):
-        # inputs_domain = input_data(meshsize)[0]
-        # inputs_domain = self.inputs_domain #.requires_grad_()
-        # inputs_boundary = input_data(meshsize)[1]
+        #inputs_domain = input_data(meshsize)[0]
+        #inputs_domain = self.inputs_domain #.requires_grad_()
+        #inputs_boundary = input_data(meshsize)[1]
+        
+        #print(f"before change: {x.shape}") 
 
         # nn_domain = model(inputs_domain)
-        # nn_boundary = self.model(self.inputs_boundary)
+        nn_boundary = self.model(self.inputs_boundary)
+        #print(nn_boundary.shape)
+        x = nn_boundary
+        #print(f"after change: {x.shape}")
         #boundary residual
         loss_boundary = torch.mean(x**2)
 
         #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
-        # kappa_grad = generate_fenics_data(n_samples,meshsize)[2]
-        # kappa_grad         = self.kappa_grad_list
-        # grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',self.kappa_grad_list, nn_grad)
+        #kappa_grad = self.generate_fenics_data(self.n_samples,self.meshsize)[2]
+        #kappa_grad         = self.kappa_grad_list
+        grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',self.kappa_grad_list, nn_grad)
 
 
-        # kappa_domain = generate_fenics_data(n_samples, meshsize)[0]
-        # kappa_domain       = self.kappa_value_list
-        # kappa_laplacian_nn = kappa_domain*nn_laplacian
+        kappa_domain = self.generate_fenics_data()[0]
+        kappa_domain       = self.kappa_value_list
+        kappa_laplacian_nn = kappa_domain*nn_laplacian
 
 
-        # f_domain = generate_fenics_data(n_samples, meshsize)[1]
-        # f_domain = self.f_value_list
-        # pde_residual = -grad_kappa_grad_nn - kappa_laplacian_nn - f_domain
-        # loss_pde = torch.mean(pde_residual**2)
+        f_domain = self.generate_fenics_data()[1]
+        f_domain = self.f_value_list
+        pde_residual = -grad_kappa_grad_nn - kappa_laplacian_nn - f_domain
+        
+        loss_pde = torch.mean(pde_residual**2)
 
 
         #regularization
-        # loss_reg = self.reg_param * sum(param.abs().sum() for param in model.parameters())
-        # loss = loss_pde+loss_boundary+loss_reg
-        loss = loss_boundary
+        loss_reg = self.reg_param * sum(param.abs().sum() for param in self.model.parameters())
+        
+        loss = loss_pde+loss_boundary+loss_reg
+        #print(f" loss_tempt:{loss}")
+        #loss = loss_boundary
         return loss
 
 
@@ -292,8 +300,10 @@ class PDEObjective:
 
         #regularization
         loss_reg = self.reg_param * sum(param.abs().sum() for param in model.parameters())
+        
 
         loss = loss_pde+loss_boundary+loss_reg
+        #print(f"loss: {loss}")
 
 
         return loss
@@ -391,11 +401,11 @@ def loss_hessian(PDEObj, reg_param = 0.01):
     # valfunc = PDEObj.loss(replace_model_params(PDEObj.model, x))
     nn_grad = grad_nn(PDEObj.model, PDEObj.inputs_domain)
     nn_laplacian = laplacian_nn(model, PDEObj.inputs_domain)
-    valfunc = lambda t: PDEObj.loss_temp(torch.func.functional_call(PDEObj.model, t, (inputs)), nn_grad, nn_laplacian)
-    print(valfunc(x).item())
+    valfunc = lambda t: PDEObj.loss_temp(torch.func.functional_call(PDEObj.model, t, (inputs)),nn_grad,nn_laplacian)
+    #print(valfunc(x).item())
 
     torch_gradient = torch.func.grad(valfunc)
-    print(torch_gradient(x))
+    #print(torch_gradient(x))
     def forwardoverrev(input, x, v):
         return torch.func.jvp(input, (x,), (v,))
 
@@ -413,7 +423,7 @@ if __name__ == "__main__":
     input_dim = 2
     output_dim = 1
     hidden_dim = 400
-    epochs = 450
+    epochs = 10
     # model = FullyConnectedNN(input_dim, hidden_dim, output_dim)
     #Loss function
     #PDE residual, for the pde residual part, we need the laplacian_nn and also the gradient of nn
@@ -427,9 +437,11 @@ if __name__ == "__main__":
 
     PDEObj    = PDEObjective(n_samples=10,meshsize=31,reg_param=0.0)
     PDEObj.model = model_small
+    loss_hessian(PDEObj)
+    #print(PDEObj.loss(model_small))
 
 
-    print('hessvec', loss_hessian(PDEObj))
+    #print('hessvec', loss_hessian(PDEObj))
 
 
     # Train the model
