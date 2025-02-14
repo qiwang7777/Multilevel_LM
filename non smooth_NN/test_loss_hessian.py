@@ -243,12 +243,12 @@ class PDEObjective:
         grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',self.kappa_grad_list, nn_grad)
 
 
-        kappa_domain = self.generate_fenics_data()[0]
+        #kappa_domain = self.generate_fenics_data()[0]
         kappa_domain       = self.kappa_value_list
         kappa_laplacian_nn = kappa_domain*nn_laplacian
 
 
-        f_domain = self.generate_fenics_data()[1]
+        #f_domain = self.generate_fenics_data()[1]
         f_domain = self.f_value_list
         pde_residual = -grad_kappa_grad_nn - kappa_laplacian_nn - f_domain
         
