@@ -223,19 +223,23 @@ class PDEObjective:
         #f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
 
     def loss_temp(self, x, nn_grad, nn_laplacian):
+        #x is the parameters of model
         #inputs_domain = input_data(meshsize)[0]
         #inputs_domain = self.inputs_domain #.requires_grad_()
         #inputs_boundary = input_data(meshsize)[1]
         
         #print(f"before change: {x.shape}") 
+       
+        
+        
 
         # nn_domain = model(inputs_domain)
-        nn_boundary = self.model(self.inputs_boundary)
+        nn_boundary = torch.func.functional_call(self.model, x, (self.inputs_boundary,))
         #print(nn_boundary.shape)
-        x = nn_boundary
+        #x = nn_boundary
         #print(f"after change: {x.shape}")
         #boundary residual
-        loss_boundary = torch.mean(x**2)
+        loss_boundary = torch.mean(nn_boundary**2)
 
         #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
         #kappa_grad = self.generate_fenics_data(self.n_samples,self.meshsize)[2]
@@ -256,12 +260,13 @@ class PDEObjective:
 
 
         #regularization
-        loss_reg = self.reg_param * sum(param.abs().sum() for param in self.model.parameters())
+        loss_reg = self.reg_param * sum(param.abs().sum() for param in x.values())
         
         loss = loss_pde+loss_boundary+loss_reg
         #print(f" loss_tempt:{loss}")
         #loss = loss_boundary
         return loss
+
 
 
     def loss(self, model):
@@ -393,7 +398,7 @@ def replace_model_params(model,new_params):
 def loss_hessian(PDEObj, reg_param = 0.01):
     x = PDEObj.model.state_dict()
     v = copy.deepcopy(x) #just to get something to multiply against
-    inputs = PDEObj.input_data()[2]
+    #inputs = PDEObj.input_data()[2]
 
     for key, vals in v.items():
        v[key] = vals.copy_(torch.randn(vals.size()))
@@ -401,11 +406,12 @@ def loss_hessian(PDEObj, reg_param = 0.01):
     # valfunc = PDEObj.loss(replace_model_params(PDEObj.model, x))
     nn_grad = grad_nn(PDEObj.model, PDEObj.inputs_domain)
     nn_laplacian = laplacian_nn(model, PDEObj.inputs_domain)
-    valfunc = lambda t: PDEObj.loss_temp(torch.func.functional_call(PDEObj.model, t, (inputs)),nn_grad,nn_laplacian)
-    #print(valfunc(x).item())
+    #valfunc = lambda t: PDEObj.loss_temp(torch.func.functional_call(PDEObj.model, t, (inputs)),nn_grad,nn_laplacian)
+    valfunc = lambda t: PDEObj.loss_temp(t,nn_grad,nn_laplacian)
+    print(valfunc(x).item())
 
     torch_gradient = torch.func.grad(valfunc)
-    #print(torch_gradient(x))
+    print(torch_gradient(x))
     def forwardoverrev(input, x, v):
         return torch.func.jvp(input, (x,), (v,))
 
