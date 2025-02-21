@@ -1,17 +1,14 @@
 #In this file, we generate the dataset, input dimension is 2 (spatial data in 2d) and output dimension is 1
 #To get all the values we need to put into loss function, including the value of kappa and f.
-from fenics import *
-from dolfin import *
+import ufl
+from dolfinx import mesh, fem
+from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector, set_bc
 
 import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 import torch.optim as optim
-
-
 import matplotlib.pyplot as plt
 
 
@@ -29,44 +26,6 @@ class FullyConnectedNN(nn.Module):
         x = self.activation(self.fc2(x))
         x = self.fc3(x)
         return x
-
-def grad_nn(PDEobj, model,inputs):
-
-    inputs = inputs.clone().detach().requires_grad_(True)
-    g = PDEObj.grad
-    outputs = model(inputs).squeeze(0)
-    print(outputs.size())
-    t = torch.matmul(g, outputs)
-    print(g.shape, t.shape)
-    if outputs.shape[1] != 1:
-        raise ValueError("The output of model must be a scalar (shape [batch_size,1]).")
-    # gradients = torch.autograd.grad(outputs,inputs,grad_outputs=torch.ones_like(outputs),create_graph = True)[0]
-    # print(gradients.size())
-    # stp
-    return t #gradients
-
-def hessian_nn(model,inputs):
-    inputs = inputs.clone().detach().requires_grad_(True)
-    inputs_num = inputs.shape[0]
-    hessian = torch.zeros(inputs_num,2,2,dtype=torch.float32)
-    outputs = model(inputs)
-    gradients = torch.autograd.grad(outputs, inputs, grad_outputs=torch.ones_like(outputs), create_graph=True)[0]
-    for i in range(2):
-        grad_i = gradients[:, i]
-        # Calculate the second-order derivatives with respect to the inputs
-        second_gradients = torch.autograd.grad(grad_i, inputs, grad_outputs=torch.ones_like(grad_i), create_graph=True)[0]
-        # Store the second-order derivatives in the Hessian matrix
-        hessian[:, i, :] = second_gradients
-
-    return hessian
-
-def laplacian_nn(model,inputs):
-    hessian = hessian_nn(model,inputs)
-    laplacian = hessian[:, 0, 0] + hessian[:, 1, 1]
-    return laplacian
-
-
-#inputs_domain = generate_fenics_data(n_samples=10,meshsize=4)[0]
 
 class PDEObjective:
     def __init__(self, n_samples = 10, meshsize = 31, reg_param = 0.01):
@@ -146,7 +105,6 @@ class PDEObjective:
         # Prepare containers for inputs and outputs
         kappa_value_list = []
         f_value_list = []
-        # kappa_grad_list = []
         u_solution_list = []
 
 
@@ -163,58 +121,38 @@ class PDEObjective:
                 degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
             )
             self.kappa = kappa
-            # Define the gradient as a vector function
-            # kappa_func = project(kappa,self.V)
-            # vector_space = self.vs
-            # t = as_vector([kappa_func.dx(0), kappa_func.dx(1)])
-            # print(t)
-            # grad_kappa = project(t, vector_space)
-            # kappa_x = Expression(
-                # "kx*pi*alpha*sin(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax))*"
-                # "cos(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))*sin(alpha*(x[0]-0.5))-"
-                # "ky*pi*alpha*cos(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax))*"
-                # "sin(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))*cos(alpha*(x[0]-0.5))",
-                # degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
-                # )
 
-            # kappa_y = Expression(
-                # "kx*pi*alpha*sin(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax))*"
-                # "cos(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))*cos(alpha*(x[1]-0.5))+"
-                # "ky*pi*alpha*cos(kx*pi*(cos(alpha)*(x[0]-0.5) - sin(alpha)*(x[1]-0.5) + 0.5 + ax))*"
-                # "sin(ky*pi*(sin(alpha)*(x[0]-0.5) + cos(alpha)*(x[1]-0.5) + 0.5 + ay))*sin(alpha*(x[1]-0.5))",
-            # degree=2, kx=kx, ky=ky, ax=ax, ay=ay, alpha=alpha, pi=np.pi
-            # )
-
-            # kappa_x_func = project(kappa_x,self.V)
-            # kappa_y_func = project(kappa_y,self.V)
-            # vector_space = VectorFunctionSpace(self.mesh,"CG",1)
-            # kappa_grad = project(as_vector([kappa_x_func,kappa_y_func]),vector_space)
-
-
+            V = self.V
             # Define variational problem
-            u = TrialFunction(self.V)
-            v = TestFunction(self.V)
+            u = TrialFunction(V)
+            v = TestFunction(V)
+            # a = dot(kappa * grad(u), grad(v)) * dx
             a = dot(kappa * grad(u), grad(v)) * dx
             L = self.f * v * dx
 
+            dxp = dx(metadata = {"quadrature_scheme":"vertex"})
+            A = dot(kappa*grad(u), grad(v))*dxp #kappa is throwing error
+            A = Form(A, bcs = self.bc)
+            A = assemble(A)
+            # print(A.array())
+            A = A.array()
+            A = A.astype(np.float32)
+            self.A = torch.from_numpy(A)
             # Solve the problem
             u_sol = Function(self.V)
             solve(a == L, u_sol, self.bc)
             # Get the solution and input features
             u_array           = u_sol.compute_vertex_values(self.mesh)
             kappa_values      = kappa.compute_vertex_values(self.mesh)
-            #grad_kappa_values = grad_kappa.compute_vertex_values(mesh).reshape(-1, 2)
-            # grad_kappa_values = kappa_grad.compute_vertex_values(self.mesh).reshape(-1, 2)
-
 
             f_values          = self.f.compute_vertex_values(self.mesh)
+            print(np.dot(A, u_array) - f_values)
+
             kappa_domain      = kappa_values[self.domain_mask]
             f_domain          = f_values[self.domain_mask]
-            # grad_kappa_domain = grad_kappa_values[self.domain_mask,:]
 
             kappa_value_list.append(kappa_domain)
             f_value_list.append(f_domain)
-            # kappa_grad_list.append(grad_kappa_domain)
             u_solution_list.append(u_array)
 
 
@@ -233,55 +171,13 @@ class PDEObjective:
         #kappa_value_list: the value of kappa(kx,ky,ax,ay,alpha,x,y), here only consider when (x,y) is in (0,1)^2
         #f_value_list: the value of f(x,y), here only consider when (x,y) is in (0,1)^2
 
-    def loss_temp(self, x):
+    def loss(self, x):
         #x is the parameters of model
-        #inputs_domain = input_data(meshsize)[0]
-        #inputs_domain = self.inputs_domain #.requires_grad_()
-        #inputs_boundary = input_data(meshsize)[1]
-
         #print(f"before change: {x.shape}")
-        print('here', self.inputs.size())
-        print('boundary', self.model, self.inputs_boundary.size(), self.inputs_domain.size())
         nn = torch.func.functional_call(self.model, x, (self.inputs,))
-        # nn_domain = torch.func.functional_call(self.model, x, (self.inputs_domain,))
-        # nn_boundary = torch.func.functional_call(self.model, x, (self.inputs_boundary,))
-        #print(nn_boundary.shape)
-        #x = nn_boundary
-        #print(f"after change: {x.shape}")
-        #boundary residual
-        # loss_boundary = torch.mean(nn_boundary**2)
 
-        #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
-        #kappa_grad = self.generate_fenics_data(self.n_samples,self.meshsize)[2]
-        #kappa_grad         = self.kappa_grad_list
-        # grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',self.kappa_grad_list, nn_grad)
-
-
-        #kappa_domain = self.generate_fenics_data()[0]
-        # kappa_domain       = self.kappa_value_list
-        # kappa_laplacian_nn = kappa_domain*nn_laplacian
-        print('fenics')
-        u = Function(self.V)
-        v = TestFunction(self.V)
-        a = inner(grad(u), grad(v)) * dx
-        # a = inner(kappa * grad(u), grad(v)) * dx
-        # L = self.f * v * dx
-        print('fenics 2')
-        J = derivative(a, u)
-        print('deri')
-        F = Form(J)
-        print('form')
-        Jc = assemble(F) #kappa is throwing error
-        print('compiler')
-        # Fc = assemble(Form(L)) #is just f stored already
-        A = Jc.array()
-        A = A.astype(np.float32)
-        A = torch.from_numpy(A)
-        print('past', A.dtype, nn.dtype)
-        #f_domain = self.generate_fenics_data()[1]
         f_domain = self.f_value_list
-        print(f_domain.size())
-        pde = torch.matmul(A,nn)
+        pde = torch.matmul(self.A,nn)
         #I suppose we can also domain_mask A?
         pde_residual = pde[self.domain_mask] - f_domain
 
@@ -292,78 +188,33 @@ class PDEObjective:
         loss_reg = self.reg_param * sum(param.abs().sum() for param in x.values())
 
         loss = loss_pde+loss_boundary+loss_reg
-        #print(f" loss_tempt:{loss}")
+        #print(f" losst:{loss}")
         #loss = loss_boundary
-        return loss
-
-
-
-    def loss(self, model):
-        # print('in loss')
-
-        # inputs_domain = input_data(meshsize)[0]
-        inputs_domain = self.inputs_domain.requires_grad_()
-        # inputs_boundary = input_data(meshsize)[1]
-
-        # nn_domain = model(inputs_domain)
-        nn_boundary = self.model(self.inputs_boundary)
-        #pde residual -kappa*laplacian_nn-dot(grad_kappa,grad_nn)-f
-        nn_grad = grad_nn(self.model, self.inputs_domain)
-        # kappa_grad = generate_fenics_data(n_samples,meshsize)[2]
-        kappa_grad         = self.kappa_grad_list
-        grad_kappa_grad_nn = torch.einsum('ijk,jk->ij',kappa_grad, nn_grad)
-
-
-        # kappa_domain = generate_fenics_data(n_samples, meshsize)[0]
-        kappa_domain = self.kappa_value_list
-        nn_laplacian = laplacian_nn(model, self.inputs_domain)
-        kappa_laplacian_nn = kappa_domain*nn_laplacian
-
-
-        # f_domain = generate_fenics_data(n_samples, meshsize)[1]
-        f_domain = self.f_value_list
-
-        pde_residual = -grad_kappa_grad_nn - kappa_laplacian_nn - f_domain
-
-
-        loss_pde = torch.mean(pde_residual**2)
-
-        #boundary residual
-
-        loss_boundary = torch.mean(nn_boundary**2)
-
-        #regularization
-        loss_reg = self.reg_param * sum(param.abs().sum() for param in model.parameters())
-
-
-        loss = loss_pde+loss_boundary+loss_reg
-        #print(f"loss: {loss}")
-
-
         return loss
 
 # Training Loop
 def train_model(model,optimizer,obj):
 
+    def closure():
+        optimizer.zero_grad()
+        loss = obj.loss(x)
+        loss.backward()
+        return loss
+
+
     # model.train()
     # x = list(model.parameters())
+    x = model.state_dict(keep_vars=True)
     for epoch in range(epochs):
         total_loss = 0
-        # loss = loss_pde(model,n_samples=10,meshsize = 31,reg_param=0.01)
-        loss = obj.loss_temp(model)
+
+
         data_num = obj.nsamps*(obj.mshsize+1)*(obj.mshsize+1)
 
-            # Forward pass
-            #outputs = model(inputs)
-            #targets = targets.view(-1, 32, 32)
-            #loss = criterion(outputs, targets)
+        # Backward pass and optimization
+        optimizer.step(closure)
 
-            # Backward pass and optimization
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
+        total_loss += obj.loss(x).item()
 
         print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss/data_num:.4f}")
 
@@ -373,14 +224,12 @@ def plot_comparison(model, PDEObj, n_samples=1):
     meshsize = PDEObj.mshsize
     real_solution = PDEObj.u_solution_tensor
     # real_solution = PDEObj.generate_fenics_data(n_samples=n_samples, meshsize=meshsize)[3]
-
     # Pass inputs_domain through the trained model to get predictions
-    predicted_solution = model(PDEObj.inputs_domain).detach().numpy()
+    predicted_solution = model(PDEObj.inputs).detach().numpy()
     # Convert solutions into 2D grids
     # real_solution_grid = real_solution.squeeze(0).reshape(meshsize + 1, meshsize + 1).numpy()
     real_solution_grid = real_solution[0].reshape(meshsize + 1, meshsize + 1).numpy()
-    predicted_solution_grid = predicted_solution.reshape(meshsize - 1, meshsize - 1) #not correct?
-
+    predicted_solution_grid = predicted_solution[PDEObj.domain_mask].reshape(meshsize - 1, meshsize - 1) #not correct?
     # Compute error (absolute difference)
     error_grid = abs(real_solution_grid[1:31, 1:31] - predicted_solution_grid)
 
@@ -415,26 +264,16 @@ def plot_comparison(model, PDEObj, n_samples=1):
     plt.show()
 
 import copy
-import torch.nn as nn
-def replace_model_params(model,new_params):
-    new_model = copy.deepcopy(model)
-    with torch.no_grad():
-        for name, param in new_model.named_parameters():
-            if name in new_params:
-                param.copy_(new_params[name])
-    return new_model
 
 def loss_hessian(PDEObj, reg_param = 0.01):
     x = PDEObj.model.state_dict()
-    print('copy')
     v = x.copy() #just to get something to multiply against
     #inputs = PDEObj.input_data()[2]
     for key, vals in v.items():
        print(key)
        v[key] = vals.copy_(torch.randn(vals.size()))
 
-    valfunc = lambda t: PDEObj.loss_temp(t)
-    print(valfunc(x).item())
+    valfunc = lambda t: PDEObj.loss(t)
 
     torch_gradient = torch.func.grad(valfunc)
     # print(torch_gradient(x))
@@ -455,18 +294,19 @@ if __name__ == "__main__":
     input_dim = 2
     output_dim = 1
     hidden_dim = 400
-    epochs = 400
+    epochs = 1000
     # model = FullyConnectedNN(input_dim, hidden_dim, output_dim)
     #Loss function
     #PDE residual, for the pde residual part, we need the laplacian_nn and also the gradient of nn
 
     # Initialize the model, loss, and optimizer
     model     = FullyConnectedNN(input_dim, hidden_dim, output_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    # optimizer = optim.LBFGS(model.parameters(), lr=0.01, history_size=10, max_iter=4, line_search_fn="strong_wolfe")
 
     PDEObj    = PDEObjective(n_samples=1,meshsize=31,reg_param=0.0)
     PDEObj.model = model
-    loss_hessian(PDEObj)
+    # loss_hessian(PDEObj)
 
 
     #print('hessvec', loss_hessian(PDEObj))
