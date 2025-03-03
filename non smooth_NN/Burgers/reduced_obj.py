@@ -343,13 +343,7 @@ class ConstraintSolver:
 
     def evaluate_nonlinearity_jacobian(self, u):
         n = self.var['n']
-        if isinstance(u, list):
-             print("u is a list")
-        else:
-             print("u is a Numpy array")
         
-        
-       
         d1, d2, d3 = np.zeros(n - 1), np.zeros(n - 1), np.zeros(n - 1)
        
         d1[:-1] = u[:-1] - u[1:]
