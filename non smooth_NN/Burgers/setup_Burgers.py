@@ -10,11 +10,11 @@ class BurgersSetup:
     Solve the Burgers, distributed control problem
     
     """
-    def __init__(self, n, nu, alpha, beta, usepc=True):
+    def __init__(self, n, mu, alpha, beta, usepc=True):
         if n <= 1:
             raise ValueError("Number of cells (n) must be greater than 1.")
-        if nu <= 0:
-            raise ValueError("Viscosity (nu) must be positive.")
+        if mu <= 0:
+            raise ValueError("Viscosity (mu) must be positive.")
         if alpha <= 0:
             raise ValueError("Control penalty parameter (alpha) must be positive.")
 
@@ -34,11 +34,11 @@ class BurgersSetup:
         A1 = A1.tocsc()
         
         d0 = np.zeros(n - 1)
-        d0[0] = -self.u0 * (self.u0 / 6 + nu / self.h)
+        d0[0] = -self.u0 * (self.u0 / 6 + mu / self.h)
         d1 = np.zeros(n - 1)
-        d1[-1] = self.u1 * (self.u1 / 6 - nu / self.h)
+        d1[-1] = self.u1 * (self.u1 / 6 - mu / self.h)
         
-        self.A = nu * spdiags([o, d, o], [-1, 0, 1], n - 1, n - 1).tocsc() + A0 + A1
+        self.A = mu * spdiags([o, d, o], [-1, 0, 1], n - 1, n - 1).tocsc() + A0 + A1
 
         # Build state observation matrix
         o = (self.h / 6 - 1 / self.h) * np.ones(n - 1)
@@ -54,6 +54,7 @@ class BurgersSetup:
             e1 = np.zeros(n - 1)
             e1[n-2] = self.h / 6
             self.B = diags([e0, self.M.diagonal(), e1]).tocsc()
+            #self.B = csc_matrix(np.column_stack((e0, self.M.toarray(), e1)))
 
         # Build control mass matrix
         if usepc:
@@ -72,16 +73,17 @@ class BurgersSetup:
 
         # Build the right-hand side for the PDE
         self.mesh = np.linspace(0, 1, n + 1)
-        self.b = self.integrate_rhs(self.mesh, lambda x: 2 * (nu + x**3)) - d0 - d1
+        self.b = self.integrate_rhs(self.mesh, lambda x: 2 * (mu + x**3)) - d0 - d1
 
         # Target state
         self.ud = -self.mesh**2
 
         # Save parameters
         self.n = n
-        self.nu = nu
+        self.mu = mu
         self.alpha = alpha
         self.beta = beta
+        self.nu = n if usepc else n + 1
         self.nz = n if usepc else n + 1
 
     def integrate_rhs(self, x, f):
