@@ -1,20 +1,26 @@
 import numpy as np
 from scipy.sparse import csr_matrix
 
+
 class Objective:
     def __init__(self, var):
         self.var = var
 
     # Compute objective function value
     def value(self, x, ftol):
+        
         nu = self.var['nu']
         M = self.var['M']
         R = self.var['R']
         alpha = self.var['alpha']
         ud = self.var['ud']
         
-        u = x[:nu]
-        z = x[nu:]
+        u = x[0] 
+        z = x[1] 
+        
+        
+        
+        
         
         diffu = u - ud[1:-1]
         uMu = diffu.T @ (M @ diffu)
@@ -29,7 +35,7 @@ class Objective:
         nu = self.var['nu']
         M = self.var['M']
         ud = self.var['ud']
-        u = x[:nu]
+        u = x[0]
         diffu = u - ud[1:-1]
         g = M @ diffu
         gerr = 0
@@ -41,7 +47,7 @@ class Objective:
         nu = self.var['nu']
         R = self.var['R']
         alpha = self.var['alpha']
-        z = x[nu:]
+        z = x[1]
         g = alpha * (R @ z)
         gerr = 0
         
