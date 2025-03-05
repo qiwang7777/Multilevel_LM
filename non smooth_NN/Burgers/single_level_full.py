@@ -608,7 +608,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
             alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
         
         #Hs = red_obj.hessVec(v, z, htol)[0]
-        Hs = problem.obj_smooth.hessVec(v, z, htol)[0]
+        Hs = problem.obj_smooth.hessVec(s, x, htol)[0]
         
         sHs = problem.dvector.apply(Hs, s)
         g0s = problem.pvector.dot(g0, s)
