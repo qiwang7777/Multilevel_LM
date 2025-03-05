@@ -1,5 +1,7 @@
 #Reduced Objective Function
 
+import numpy as np
+
 class ReducedObjective:
     def __init__(self, obj0, con0):
         self.obj0 = obj0
@@ -13,28 +15,24 @@ class ReducedObjective:
         self.pwork = None
         self.pcache = None
         self.cnt = {
-            "nstate": 0, "nadjoint": 0, "nstatesens": 0,
-            "nadjointsens": 0, "ninvJ1": 0
+            'nstate': 0, 'nadjoint': 0, 'nstatesens': 0, 'nadjointsens': 0, 'ninvJ1': 0
         }
     
     def begin_counter(self, iter, cnt0):
         if iter == 0:
-            cnt0.update({
-                "nstatehist": [], "nadjoihist": [], "nstsenhist": [],
-                "nadsenhist": [], "ninvJ1hist": []
-            })
+            cnt0.update({'nstatehist': [], 'nadjoihist': [], 'nstsenhist': [], 'nadsenhist': [], 'ninvJ1hist': []})
             for key in self.cnt:
                 self.cnt[key] = 0
         return self.con0.begin_counter(iter, cnt0)
-    
+
     def end_counter(self, iter, cnt0):
-        cnt0["nstatehist"].append(self.cnt["nstate"])
-        cnt0["nadjoihist"].append(self.cnt["nadjoint"])
-        cnt0["nstsenhist"].append(self.cnt["nstatesens"])
-        cnt0["nadsenhist"].append(self.cnt["nadjointsens"])
-        cnt0["ninvJ1hist"].append(self.cnt["ninvJ1"])
+        cnt0['nstatehist'].append(self.cnt['nstate'])
+        cnt0['nadjoihist'].append(self.cnt['nadjoint'])
+        cnt0['nstsenhist'].append(self.cnt['nstatesens'])
+        cnt0['nadsenhist'].append(self.cnt['nadjointsens'])
+        cnt0['ninvJ1hist'].append(self.cnt['ninvJ1'])
         return self.con0.end_counter(iter, cnt0)
-    
+
     def reset(self):
         self.uwork = None
         self.ucache = None
@@ -44,117 +42,94 @@ class ReducedObjective:
         self.pcache = None
         self.is_adjoint_computed = False
         self.is_adjoint_cached = False
-    
+
     def update(self, x, type):
-        if type == "init":
+        if type == 'init':
             self.is_state_computed = False
             self.is_state_cached = False
             self.is_adjoint_computed = False
             self.is_adjoint_cached = False
-        elif type == "trial":
+        elif type == 'trial':
             self.is_state_cached = self.is_state_computed
             self.is_adjoint_cached = self.is_adjoint_computed
             self.is_state_computed = False
             self.is_adjoint_computed = False
-        elif type == "reject":
+        elif type == 'reject':
             if self.is_state_cached:
                 self.uwork = self.ucache
                 self.is_state_computed = True
-            else:
-                self.is_state_computed = False
             if self.is_adjoint_cached:
                 self.pwork = self.pcache
                 self.is_adjoint_computed = True
-            else:
-                self.is_adjoint_computed = False
-        elif type == "accept":
+        elif type == 'accept':
             if self.is_state_computed:
                 self.ucache = self.uwork
             if self.is_adjoint_computed:
                 self.pcache = self.pwork
-        elif type == "temp":
+        elif type == 'temp':
             self.is_state_computed = False
             self.is_adjoint_computed = False
     
     def value(self, z, ftol):
         ferr = 0
+        
         if not self.is_state_computed or self.uwork is None:
             self.uwork, cnt0, serr = self.con0.solve(z, ftol)
-            self.cnt["ninvJ1"] += cnt0
+            self.cnt['ninvJ1'] += cnt0
             self.is_state_computed = True
-            self.cnt["nstate"] += 1
+            self.cnt['nstate'] += 1
             ferr = max(ferr, serr)
-        val, verr = self.obj0.value([self.uwork, z], ftol)
+        val, verr = self.obj0.value(np.hstack([self.uwork, z]), ftol)
         return val, max(ferr, verr)
-    
+
     def gradient(self, z, gtol):
-        gerr = 0
         if not self.is_state_computed or self.uwork is None:
             self.uwork, cnt0, serr = self.con0.solve(z, gtol)
-            self.cnt["ninvJ1"] += cnt0
+            self.cnt['ninvJ1'] += cnt0
             self.is_state_computed = True
-            self.cnt["nstate"] += 1
-            gerr = max(gerr, serr)
+            self.cnt['nstate'] += 1
         if not self.is_adjoint_computed or self.pwork is None:
-            rhs, aerr1 = self.obj0.gradient_1([self.uwork, z], gtol)
+            rhs, aerr1 = self.obj0.gradient_1(np.hstack([self.uwork,z]), gtol)
             rhs = -rhs
-            
             self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], gtol)
-            self.cnt["ninvJ1"] += 1
+            self.cnt['ninvJ1'] += 1
             self.is_adjoint_computed = True
-            self.cnt["nadjoint"] += 1
-            gerr = max(gerr, aerr1, aerr2)
+            self.cnt['nadjoint'] += 1
         Bp, jerr = self.con0.apply_adjoint_jacobian_2(self.pwork, [self.uwork, z], gtol)
-        grad, gerr1 = self.obj0.gradient_2([self.uwork, z], gtol)
-        return grad + Bp, max(gerr, jerr, gerr1)
+        grad, gerr1 = self.obj0.gradient_2(np.hstack([self.uwork,z]), gtol)
+        return grad + Bp, max(jerr, gerr1)
     
-    def hessVec(self,v,z,htol):
-        herr = 0
-        #solve the state equation for u(z)
+    def hessVec(self, v, z, htol):
         if not self.is_state_computed or self.uwork is None:
-            self.uwrok, cnt0, serr = self.con0.solve(z,htol)
-            self.cnt["ninvJ1"] += cnt0
+            self.uwork, cnt0, serr = self.con0.solve(z, htol)
+            self.cnt['ninvJ1'] += cnt0
             self.is_state_computed = True
-            self.cnt["nstate"] += 1
-            herr = max(herr, serr)
-            
-            
-        #solve the adjoint equation for p
+            self.cnt['nstate'] += 1
         if not self.is_adjoint_computed or self.pwork is None:
-            rhs, aerr1 = self.obj0.gradient_1([self.uwork,z],htol)
+            rhs, aerr1 = self.obj0.gradient_1([self.uwork, z], htol)
             rhs = -rhs
-            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork,z][0],htol)
-            self.cnt["ninvJ1"] += 1
+            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], htol)
+            self.cnt['ninvJ1'] += 1
             self.is_adjoint_computed = True
-            self.cnt["nadjoint"] += 1
-            herr = max(gerr, aerr1, aerr2)
-            
-            
-        #compute the directional derivative of the state (\delta u)
-        rhs_du = -self.con0.apply_jacobian_2(v,[self.uwork,z],htol)[0]
-        du, herr1 = self.con0.apply_inverse_jacobian_1(rhs_du, [self.uwork,z][0],htol)
-        
-        #compute the directional dervative of the adjoint (\delta p)
-        rhs_dp = -self.obj0.hessVec_11(du,[self.uwork,z],htol)[0]-self.con0.apply_adjoint_hessian_11(du, self.pwork, [self.uwork,z],htol)[0]
-        dp, herr2 = self.con0.apply_inverse_jacobian_1(rhs_dp, [self.uwork,z][0],htol)
-        
-        #compute the Hessian-vector product
-        hv_z,herr3 = self.obj0.hessVec_22(v,[self.uwork,z],htol)
-        hv_cross, herr4 = self.con0.apply_adjoint_jacobian_2(dp,[self.uwork,z],htol)
-        hv = hv_z+hv_cross
-        return hv, max(herr,herr1,herr2,herr3,herr4)
-            
-            
+            self.cnt['nadjoint'] += 1
+        rhs, sserr1 = self.con0.apply_jacobian_2(v, [self.uwork, z], htol)
+        rhs = -rhs
+        w, sserr2 = self.con0.apply_inverse_jacobian_1(rhs, [self.uwork, z][0], htol)
+        rhs, aserr1 = self.obj0.hessVec_11(w, [self.uwork, z], htol)
+        q, aserr5 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], htol)
+        q = -q
+        self.cnt['ninvJ1'] += 1
+        hv, herr1 = self.con0.apply_adjoint_jacobian_2(q, [self.uwork, z], htol)
+        return hv, max(herr1, aserr1, aserr5)
     
     def profile(self):
         print("\nProfile Reduced Objective")
         print("  #state    #adjoint    #statesens    #adjointsens    #linearsolves")
-        print("  {:6d}      {:6d}        {:6d}          {:6d}           {:6d}".format(
-            self.cnt["nstate"], self.cnt["nadjoint"], self.cnt["nstatesens"],
-            self.cnt["nadjointsens"], self.cnt["ninvJ1"]
-        ))
-        self.cnt["con"] = self.con0.profile()
-        return self.cnt
+        print(f"  {self.cnt['nstate']:6d}      {self.cnt['nadjoint']:6d}        {self.cnt['nstatesens']:6d}          {self.cnt['nadjointsens']:6d}           {self.cnt['ninvJ1']:6d}")
+        cnt = self.cnt.copy()
+        cnt['con'] = self.con0.profile()
+        return cnt
+
     
 
 
@@ -170,14 +145,15 @@ class Objective:
     # Compute objective function value
     def value(self, x, ftol):
         
+        
         nu = self.var['nu']
         M = self.var['M']
         R = self.var['R']
         alpha = self.var['alpha']
         ud = self.var['ud']
         
-        u = x[0] 
-        z = x[1] 
+        u = x[:nu] 
+        z = x[nu:] 
         
         
         
@@ -196,7 +172,9 @@ class Objective:
         nu = self.var['nu']
         M = self.var['M']
         ud = self.var['ud']
-        u = x[0]
+        u = x[:nu][0]
+        #print(u[0].shape)
+        
         diffu = u - ud[1:-1]
         g = M @ diffu
         gerr = 0
@@ -208,7 +186,10 @@ class Objective:
         nu = self.var['nu']
         R = self.var['R']
         alpha = self.var['alpha']
-        z = x[1]
+        z = x[nu:]
+        #print(R.shape)
+        #print(x.shape)
+        #print(z.shape)
         g = alpha * (R @ z)
         gerr = 0
         
@@ -268,6 +249,8 @@ class ConstraintSolver:
     def solve(self, z, stol=1e-12):
         nu = self.var['nu']
         u = self.uprev
+        
+        
         c, _ = self.value(np.hstack([u,z]))
         cnt = 0 
         atol = stol
@@ -301,11 +284,12 @@ class ConstraintSolver:
     def reset(self):
         self.uprev = np.ones(self.var['nu'])
 
-    def value(self,x):
+    def value(self,x,vtol=1e-6):
         nu = self.var['nu']
         A, B, b = self.var['A'], self.var['B'], self.var['b']
         u, z = x[:nu], x[nu:]
         Nu = self.evaluate_nonlinearity_value(u)
+        #print("x_shape:",x.shape)
         #print("A_shape:", A.shape) #(n-1,n-1)
         #print("u_shape:",u.shape)  #(n-1,)
         #print("Nu_shape:", Nu.shape) #(n-1,)
@@ -326,7 +310,7 @@ class ConstraintSolver:
     def apply_jacobian_2(self, v,x,gtol=1e-6):
         return -self.var['B'] @ v, 0
 
-    def apply_adjoint_jacobian_1(self, v, x):
+    def apply_adjoint_jacobian_1(self, v, x,gtol=1e-6):
         nu = self.var['nu']
         A = self.var['A']
         u = x[:nu]
@@ -363,16 +347,16 @@ class ConstraintSolver:
                 ahuv[i] += (u[i - 1] * (v[i - 1] + 2 * v[i]) - u[i] * v[i - 1]) / 6
         return ahuv, 0
 
-    def apply_adjoint_hessian_12(self, u, v, x):
+    def apply_adjoint_hessian_12(self, u, v, x,htol=1e-6):
         return np.zeros(self.var['nz']), 0
 
-    def apply_adjoint_hessian_21(self, u, v, x):
+    def apply_adjoint_hessian_21(self, u, v, x,htol=1e-6):
         return np.zeros(self.var['nu']), 0
 
-    def apply_adjoint_hessian_22(self, u, v, x):
+    def apply_adjoint_hessian_22(self, u, v, x,htol=1e-6):
         return np.zeros(self.var['nz']), 0
 
-    def evaluate_nonlinearity_value(self, u):
+    def evaluate_nonlinearity_value(self, u,htol=1e-6):
         n = self.var['n']
         Nu = np.zeros(n - 1)
         Nu[:-1] += u[:-1] * u[1:] + u[1:] ** 2
@@ -539,25 +523,27 @@ red_obj = ReducedObjective(obj, con)
 z = np.random.rand(nz)
 u = np.zeros(nu)
 ftol = 1e-6
+x = np.hstack([u, z])
+
 # Evaluate the reduced objective function value
 val,err = red_obj.value(z, ftol)
 print("Objective function value:", val)
-print("Error estimate:",err)
+#print("Error estimate:",err)
 
 #Compute the reduced gradient
-gtol = 1e-6
-grad,gerr = red_obj.gradient(z, gtol)
-print("Gradient:",grad)
-print("Gradient error estimate:", gerr)
+#gtol = 1e-6
+#grad,gerr = red_obj.gradient(x_try, gtol)
+#print("Gradient:",grad.shape)
+#print("Gradient error estimate:", gerr)
 #Profile the computation
-red_obj.profile()
+#red_obj.profile()
 
 #Compute the Hessian
-htol = 1e-6
-v = np.random.rand(var['nz'])
-hv, herr = red_obj.hessVec(v, z, htol)
-print("Hessian-vector product:", hv.shape)
-print("Error estimate:", herr)
+#htol = 1e-6
+#v = np.random.rand(var['nz'])
+#hv, herr = red_obj.hessVec(v, x_try, htol)
+#print("Hessian-vector product:", hv.shape)
+#print("Hessian-vector Error estimate:", herr)
 
 def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     params.setdefault('maxitsp', 10)
@@ -608,7 +594,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
             alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
         
         #Hs = red_obj.hessVec(v, z, htol)[0]
-        Hs = problem.obj_smooth.hessVec(s, x, htol)[0]
+        Hs = problem.obj_smooth.hessVec(s, x, params['gtol'])[0]
         
         sHs = problem.dvector.apply(Hs, s)
         g0s = problem.pvector.dot(g0, s)
@@ -1186,7 +1172,8 @@ def set_default_parameters(name):
 z_opt, cnt = trustregion(z, problem, params)
 
 # Print results
-print("\nOptimized solution:", z_opt)
+#print("\nOptimized solution:", z_opt)
+print("debug")
 
 
 def deriv_check_simopt(u0, z0, obj, con, tol):
@@ -1205,24 +1192,27 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     udir = np.random.randn(*u0.shape)
     z = np.random.randn(*z0.shape)
     zdir = np.random.randn(*z0.shape)
-    lambda_ = np.random.randn(*con.value(np.hstack([u0, z0])).shape)
+    
+    lambda_ = np.random.randn(*(con.value(np.hstack([u, z]))[0]).shape)
 
     # Evaluate objective and constraint functions
-    f = obj.value(np.hstack([u, z]), tol)
-    df1 = obj.gradient_1(np.hstack([u, z]), tol)
-    df2 = obj.gradient_2(np.hstack([u, z]), tol)
-    c = con.value(np.hstack([u, z]), tol)
-    J1d = con.apply_jacobian_1(udir, np.hstack([u, z]), tol)
-    J2d = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)
-    J1 = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z]), tol)
-    J2 = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z]), tol)
+    f = obj.value(np.hstack([u, z]), tol)[0]
+    
+    df1 = obj.gradient_1(np.hstack([u, z]), tol)[0]
+    
+    df2 = obj.gradient_2(np.hstack([u, z]), tol)[0]
+    c = con.value(np.hstack([u, z]), tol)[0]
+    J1d = con.apply_jacobian_1(udir, np.hstack([u, z]), tol)[0]
+    J2d = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
+    J1 = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z]), tol)[0]
+    J2 = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z]), tol)[0]
 
     # Check objective gradient_1 using finite differences
     print("\n Objective gradient_1 check using finite differences (FDs)")
     print(" FD step size      grad'*v      FD approx.  absolute error")
     delta = 1
     for d in range(13):
-        f1 = obj.value(np.hstack([u + delta * udir, z]), tol)
+        f1 = obj.value(np.hstack([u + delta * udir, z]), tol)[0]
         error = np.abs(np.dot(df1, udir) - (f1 - f) / delta)
         print(f" {delta:12.6e}  {np.dot(df1, udir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
         delta /= 10
@@ -1232,7 +1222,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     print(" FD step size      grad'*v      FD approx.  absolute error")
     delta = 1
     for d in range(13):
-        f1 = obj.value(np.hstack([u, z + delta * zdir]), tol)
+        f1 = obj.value(np.hstack([u, z + delta * zdir]), tol)[0]
         error = np.abs(np.dot(df2, zdir) - (f1 - f) / delta)
         print(f" {delta:12.6e}  {np.dot(df2, zdir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
         delta /= 10
@@ -1240,10 +1230,11 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check objective Hessian_11 using finite differences
     print("\n Objective Hessian_11 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_11(udir, np.hstack([u, z]), tol)
+    hv = obj.hessVec_11(udir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u + delta * udir, z]), tol)
+        g1 = obj.gradient_1(np.hstack([u + delta * udir, z]), tol)[0]
+        
         fd_approx = (g1 - df1) / delta
         error = np.linalg.norm(hv - fd_approx)
         print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1252,36 +1243,42 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check objective Hessian_12 using finite differences
     print("\n Objective Hessian_12 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_12(zdir, np.hstack([u, z]), tol)
+    hv = obj.hessVec_12(zdir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u, z + delta * zdir]), tol)
+        g1 = obj.gradient_1(np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (g1 - df1) / delta
-        error = np.linalg.norm(hv - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
+        fd_approx_for_norm = fd_approx.reshape(-1,1)
+        
+        
+        error = np.linalg.norm(hv - fd_approx_for_norm)
+       
+        print(f" {delta:12.6e}     {sp.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
         delta /= 10
 
     # Check objective Hessian_21 using finite differences
     print("\n Objective Hessian_21 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_21(udir, np.hstack([u, z]), tol)
+    hv = obj.hessVec_21(udir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u + delta * udir, z]), tol)
+        g1 = obj.gradient_2(np.hstack([u + delta * udir, z]), tol)[0]
         fd_approx = (g1 - df2) / delta
-        error = np.linalg.norm(hv - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
+        fd_approx_for_norm = fd_approx.reshape(-1,1)
+        error = np.linalg.norm(hv - fd_approx_for_norm)
+        print(f" {delta:12.6e}     {sp.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
         delta /= 10
 
     # Check objective Hessian_22 using finite differences
     print("\n Objective Hessian_22 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_22(zdir, np.hstack([u, z]), tol)
+    hv = obj.hessVec_22(zdir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u, z + delta * zdir]), tol)
+        g1 = obj.gradient_2(np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (g1 - df2) / delta
-        error = np.linalg.norm(hv - fd_approx)
+        fd_approx_for_norm = fd_approx.reshape(-1,1)
+        error = np.linalg.norm(hv - fd_approx_for_norm)
         print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
         delta /= 10
 
@@ -1290,7 +1287,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
     delta = 1
     for d in range(13):
-        c1 = con.value(np.hstack([u + delta * udir, z]), tol)
+        c1 = con.value(np.hstack([u + delta * udir, z]), tol)[0]
         fd_approx = (c1 - c) / delta
         error = np.linalg.norm(J1d - fd_approx)
         print(f" {delta:12.6e}     {np.linalg.norm(J1d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1301,7 +1298,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
     delta = 1
     for d in range(13):
-        c1 = con.value(np.hstack([u, z + delta * zdir]), tol)
+        c1 = con.value(np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (c1 - c) / delta
         error = np.linalg.norm(J2d - fd_approx)
         print(f" {delta:12.6e}     {np.linalg.norm(J2d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1310,10 +1307,11 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check constraint Hessian_11 using finite differences
     print("\n Constraint Hessian_11 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_11(lambda_, udir, np.hstack([u, z]), tol)
+    Hv = con.apply_adjoint_hessian_11(lambda_, udir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u + delta * udir, z]), tol)
+        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
+        
         fd_approx = (Jn - J1) / delta
         error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
         print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1322,10 +1320,10 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check constraint Hessian_12 using finite differences
     print("\n Constraint Hessian_12 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_12(lambda_, udir, np.hstack([u, z]), tol)
+    Hv = con.apply_adjoint_hessian_12(lambda_, udir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u + delta * udir, z]), tol)
+        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
         fd_approx = (Jn - J2) / delta
         error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
         print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1334,10 +1332,10 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check constraint Hessian_21 using finite differences
     print("\n Constraint Hessian_21 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_21(lambda_, zdir, np.hstack([u, z]), tol)
+    Hv = con.apply_adjoint_hessian_21(lambda_, zdir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z + delta * zdir]), tol)
+        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (Jn - J1) / delta
         error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
         print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1346,10 +1344,10 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check constraint Hessian_22 using finite differences
     print("\n Constraint Hessian_22 check using finite differences (FDs)")
     print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_22(lambda_, zdir, np.hstack([u, z]), tol)
+    Hv = con.apply_adjoint_hessian_22(lambda_, zdir, np.hstack([u, z]), tol)[0]
     delta = 1
     for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z + delta * zdir]), tol)
+        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (Jn - J2) / delta
         error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
         print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1357,23 +1355,23 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
 
     # Check solve
     print("\n Solve check")
-    uz = con.solve(z, tol)
+    uz = con.solve(z, tol)[0]
     _, res = con.value(np.hstack([uz, z]), tol)
     print(f"  Absolute Residual = {res:12.6e}")
     print(f"  Relative Residual = {res / np.linalg.norm(uz):12.6e}")
 
     # Check applyInverseJacobian_1
     print("\n Check applyInverseJacobian_1")
-    uz = con.apply_inverse_jacobian_1(udir, np.hstack([u, z]), tol)
-    Juz = con.apply_jacobian_1(uz, np.hstack([u, z]), tol)
+    uz = con.apply_inverse_jacobian_1(udir, np.hstack([u, z]), tol)[0]
+    Juz = con.apply_jacobian_1(uz, np.hstack([u, z]), tol)[0]
     res = np.linalg.norm(Juz - udir)
     print(f"  Absolute Error = {res:12.6e}")
     print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
 
     # Check applyInverseAdjointJacobian_1
     print("\n Check applyInverseAdjointJacobian_1")
-    uz = con.apply_inverse_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)
-    Juz = con.apply_adjoint_jacobian_1(uz, np.hstack([u, z]), tol)
+    uz = con.apply_inverse_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
+    Juz = con.apply_adjoint_jacobian_1(uz, np.hstack([u, z]), tol)[0]
     res = np.linalg.norm(Juz - udir)
     print(f"  Absolute Error = {res:12.6e}")
     print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
@@ -1381,15 +1379,15 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     # Check applyAdjointJacobian_1
     print("\n Check applyAdjointJacobian_1")
     vdir = np.random.randn(*udir.shape)
-    aju = con.apply_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)
-    ju = con.apply_jacobian_1(vdir, np.hstack([u, z]), tol)
+    aju = con.apply_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
+    ju = con.apply_jacobian_1(vdir, np.hstack([u, z]), tol)[0]
     res = np.abs(np.dot(aju, vdir) - np.dot(ju, udir))
     print(f"  Absolute Error = {res:12.6e}")
 
     # Check applyAdjointJacobian_2
     print("\n Check applyAdjointJacobian_2")
-    aju = con.apply_adjoint_jacobian_2(udir, np.hstack([u, z]), tol)
-    ju = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)
+    aju = con.apply_adjoint_jacobian_2(udir, np.hstack([u, z]), tol)[0]
+    ju = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
     res = np.abs(np.dot(aju, zdir) - np.dot(ju, udir))
     print(f"  Absolute Error = {res:12.6e}")
 
@@ -1504,7 +1502,7 @@ def driver(savestats, name):
     beta = 1e-2  # L1 penalty parameter
     usepc = True  # Use piecewise constant controls
     useInexact = False
-    derivCheck = False
+    derivCheck = True
 
     
     obj = Objective(var)
