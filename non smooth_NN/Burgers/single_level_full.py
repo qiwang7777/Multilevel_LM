@@ -91,11 +91,11 @@ class ReducedObjective:
         if not self.is_adjoint_computed or self.pwork is None:
             rhs, aerr1 = self.obj0.gradient_1(np.hstack([self.uwork,z]), gtol)
             rhs = -rhs
-            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], gtol)
+            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), gtol)
             self.cnt['ninvJ1'] += 1
             self.is_adjoint_computed = True
             self.cnt['nadjoint'] += 1
-        Bp, jerr = self.con0.apply_adjoint_jacobian_2(self.pwork, [self.uwork, z], gtol)
+        Bp, jerr = self.con0.apply_adjoint_jacobian_2(self.pwork, np.hstack([self.uwork, z]), gtol)
         grad, gerr1 = self.obj0.gradient_2(np.hstack([self.uwork,z]), gtol)
         return grad + Bp, max(jerr, gerr1)
     
@@ -106,20 +106,20 @@ class ReducedObjective:
             self.is_state_computed = True
             self.cnt['nstate'] += 1
         if not self.is_adjoint_computed or self.pwork is None:
-            rhs, aerr1 = self.obj0.gradient_1([self.uwork, z], htol)
+            rhs, aerr1 = self.obj0.gradient_1(np.hstack([self.uwork, z]), htol)
             rhs = -rhs
-            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], htol)
+            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
             self.cnt['ninvJ1'] += 1
             self.is_adjoint_computed = True
             self.cnt['nadjoint'] += 1
-        rhs, sserr1 = self.con0.apply_jacobian_2(v, [self.uwork, z], htol)
+        rhs, sserr1 = self.con0.apply_jacobian_2(v,np.hstack([self.uwork, z]), htol)
         rhs = -rhs
-        w, sserr2 = self.con0.apply_inverse_jacobian_1(rhs, [self.uwork, z][0], htol)
-        rhs, aserr1 = self.obj0.hessVec_11(w, [self.uwork, z], htol)
-        q, aserr5 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, [self.uwork, z][0], htol)
+        w, sserr2 = self.con0.apply_inverse_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
+        rhs, aserr1 = self.obj0.hessVec_11(w, np.hstack([self.uwork, z]), htol)
+        q, aserr5 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
         q = -q
         self.cnt['ninvJ1'] += 1
-        hv, herr1 = self.con0.apply_adjoint_jacobian_2(q, [self.uwork, z], htol)
+        hv, herr1 = self.con0.apply_adjoint_jacobian_2(q, np.hstack([self.uwork, z]), htol)
         return hv, max(herr1, aserr1, aserr5)
     
     def profile(self):
@@ -155,10 +155,6 @@ class Objective:
         u = x[:nu] 
         z = x[nu:] 
         
-        
-        
-        
-        
         diffu = u - ud[1:-1]
         uMu = diffu.T @ (M @ diffu)
         zRz = z.T @ (R @ z)
@@ -167,13 +163,12 @@ class Objective:
         
         return val, ferr
     
-    # Compute objective function gradient (gradient_1)
+    # Compute objective function gradient (w.r.t. u)
     def gradient_1(self, x, gtol):
         nu = self.var['nu']
         M = self.var['M']
         ud = self.var['ud']
-        u = x[:nu][0]
-        #print(u[0].shape)
+        u = x[:nu]
         
         diffu = u - ud[1:-1]
         g = M @ diffu
@@ -187,9 +182,6 @@ class Objective:
         R = self.var['R']
         alpha = self.var['alpha']
         z = x[nu:]
-        #print(R.shape)
-        #print(x.shape)
-        #print(z.shape)
         g = alpha * (R @ z)
         gerr = 0
         
@@ -289,13 +281,7 @@ class ConstraintSolver:
         A, B, b = self.var['A'], self.var['B'], self.var['b']
         u, z = x[:nu], x[nu:]
         Nu = self.evaluate_nonlinearity_value(u)
-        #print("x_shape:",x.shape)
-        #print("A_shape:", A.shape) #(n-1,n-1)
-        #print("u_shape:",u.shape)  #(n-1,)
-        #print("Nu_shape:", Nu.shape) #(n-1,)
-        #print("B_shape:", B.shape) #(n-1,n)
-        #print("z_shape:",z.shape) #(n,)
-        #print("b_shape:",b.shape) #(n-1,)
+
         c = A @ u + Nu - (B @ z + b)
         return c, 0
 
@@ -494,6 +480,7 @@ nz = Burgers.n
 alpha = Burgers.alpha
 beta = Burgers.beta
 M = Burgers.M
+
 R = Burgers.R
 A = Burgers.A
 Rlump = Burgers.Rlump
@@ -526,8 +513,8 @@ ftol = 1e-6
 x = np.hstack([u, z])
 
 # Evaluate the reduced objective function value
-val,err = red_obj.value(z, ftol)
-print("Objective function value:", val)
+#val,err = red_obj.value(z, ftol)
+#print("Objective function value:", val)
 #print("Error estimate:",err)
 
 #Compute the reduced gradient
@@ -790,13 +777,13 @@ s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_SPG2(
 )
 
 # Update the control vector
-z_new = z + s
+#z_new = z + s
 
 # Print results
-print("Step:", s)
-print("New control vector:", z_new)
-print("Predicted reduction:", pRed)
-print("Exit flag:", iflag)
+#print("Step:", s)
+#print("New control vector:", z_new)
+#print("Predicted reduction:", pRed)
+#print("Exit flag:", iflag)
 
 #Trust region method
 
@@ -1169,11 +1156,11 @@ def set_default_parameters(name):
     return params
 
 
-z_opt, cnt = trustregion(z, problem, params)
+#z_opt, cnt = trustregion(z, problem, params)
 
 # Print results
 #print("\nOptimized solution:", z_opt)
-print("debug")
+
 
 
 def deriv_check_simopt(u0, z0, obj, con, tol):
@@ -1189,9 +1176,12 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     """
     # Random directions for finite differences
     u = np.random.randn(*u0.shape)
-    udir = np.random.randn(*u0.shape)
+   
+    udir = np.random.rand(*u0.shape)
+    
     z = np.random.randn(*z0.shape)
-    zdir = np.random.randn(*z0.shape)
+    
+    zdir = np.random.rand(*z0.shape)
     
     lambda_ = np.random.randn(*(con.value(np.hstack([u, z]))[0]).shape)
 
@@ -1199,6 +1189,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     f = obj.value(np.hstack([u, z]), tol)[0]
     
     df1 = obj.gradient_1(np.hstack([u, z]), tol)[0]
+    
     
     df2 = obj.gradient_2(np.hstack([u, z]), tol)[0]
     c = con.value(np.hstack([u, z]), tol)[0]
@@ -1211,9 +1202,11 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     print("\n Objective gradient_1 check using finite differences (FDs)")
     print(" FD step size      grad'*v      FD approx.  absolute error")
     delta = 1
+    
     for d in range(13):
         f1 = obj.value(np.hstack([u + delta * udir, z]), tol)[0]
-        error = np.abs(np.dot(df1, udir) - (f1 - f) / delta)
+        
+        error = np.abs(np.dot(df1, udir) - ((f1 - f) / delta))
         print(f" {delta:12.6e}  {np.dot(df1, udir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
         delta /= 10
 
@@ -1406,6 +1399,8 @@ def deriv_check(x, d, problem, tol):
     
     for i in range(13):
         xnew = x + t * d
+        
+        
         problem.obj_smooth.update(xnew, 'temp')
         valnew, _ = problem.obj_smooth.value(xnew, tol)
         fd = (valnew - val) / t
