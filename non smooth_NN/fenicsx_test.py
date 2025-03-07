@@ -100,13 +100,13 @@ class PDEObjective:
             # a = dot(kappa * grad(u), grad(v)) * dx
             uh = fem.Function(V)
             u  = ufl.TrialFunction(V)
-            F = ufl.dot(ufl.grad(uh), ufl.grad(v)) * ufl.dx  - ufl.inner(self.f, v) * ufl.dx
+            F = ufl.dot(K*ufl.grad(uh), ufl.grad(v)) * ufl.dx  - ufl.inner(self.f, v) * ufl.dx
             # L = self.f * v * ufl.dx
             p = fem.petsc.NonlinearProblem(F, uh, bcs = [self.bc])
             solver = PETSC.NewtonSolver(MPI.COMM_WORLD, p)
             solver.solve(uh)
             #get operators
-            a = ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
+            a = ufl.dot(K*ufl.grad(u), ufl.grad(v)) * ufl.dx
             l = self.f * v * ufl.dx
             cost =  1 / 2 * (uh ) * (uh) * ufl.dx #+ alpha / 2 * f**2 * ufl.dx
             ac = fem.form(a)

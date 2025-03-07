@@ -17,7 +17,7 @@ class ReducedObjective:
         self.cnt = {
             'nstate': 0, 'nadjoint': 0, 'nstatesens': 0, 'nadjointsens': 0, 'ninvJ1': 0
         }
-    
+
     def begin_counter(self, iter, cnt0):
         if iter == 0:
             cnt0.update({'nstatehist': [], 'nadjoihist': [], 'nstsenhist': [], 'nadsenhist': [], 'ninvJ1hist': []})
@@ -69,10 +69,10 @@ class ReducedObjective:
         elif type == 'temp':
             self.is_state_computed = False
             self.is_adjoint_computed = False
-    
+
     def value(self, z, ftol):
         ferr = 0
-        
+
         if not self.is_state_computed or self.uwork is None:
             self.uwork, cnt0, serr = self.con0.solve(z, ftol)
             self.cnt['ninvJ1'] += cnt0
@@ -98,30 +98,50 @@ class ReducedObjective:
         Bp, jerr = self.con0.apply_adjoint_jacobian_2(self.pwork, np.hstack([self.uwork, z]), gtol)
         grad, gerr1 = self.obj0.gradient_2(np.hstack([self.uwork,z]), gtol)
         return grad + Bp, max(jerr, gerr1)
-    
+
     def hessVec(self, v, z, htol):
+        herr = 0
         if not self.is_state_computed or self.uwork is None:
-            self.uwork, cnt0, serr = self.con0.solve(z, htol)
-            self.cnt['ninvJ1'] += cnt0
-            self.is_state_computed = True
-            self.cnt['nstate'] += 1
+            self.uwork, cnt0, serr  = self.con0.solve(z, htol)
+            self.cnt['ninvJ1']     += cnt0
+            self.is_state_computed  = True
+            self.cnt['nstate']     += 1
         if not self.is_adjoint_computed or self.pwork is None:
-            rhs, aerr1 = self.obj0.gradient_1(np.hstack([self.uwork, z]), htol)
-            rhs = -rhs
-            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
-            self.cnt['ninvJ1'] += 1
-            self.is_adjoint_computed = True
-            self.cnt['nadjoint'] += 1
-        rhs, sserr1 = self.con0.apply_jacobian_2(v,np.hstack([self.uwork, z]), htol)
-        rhs = -rhs
-        w, sserr2 = self.con0.apply_inverse_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
-        rhs, aserr1 = self.obj0.hessVec_11(w, np.hstack([self.uwork, z]), htol)
-        q, aserr5 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
-        q = -q
+            rhs, aerr1                = self.obj0.gradient_1(np.hstack([self.uwork, z]), htol)
+            rhs                       = -rhs
+            self.pwork, aerr2         = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
+            self.cnt['ninvJ1']       += 1
+            self.is_adjoint_computed  = True
+            self.cnt['nadjoint']     += 1
+        # Solve state sensitivity equation
+        rhs, sserr1  = self.con0.apply_jacobian_2(v,np.hstack([self.uwork, z]), htol)
+        rhs          = -rhs
+        w, sserr2    = self.con0.apply_inverse_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
+        # add counters
+        # Solve adjoint sensitivity equation
+        rhs, aserr1  = self.obj0.hessVec_11(w, np.hstack([self.uwork, z]), htol)
+        tmp, aserr2  = self.obj0.hessVec_12(v, np.hstack([self.uwork, z]),   htol)
+        rhs         += tmp
+        tmp, aserr3  = self.con0.apply_adjoint_hessian_11(self.pwork, w, np.hstack([self.uwork, z]), htol)
+        rhs         += tmp
+        tmp, aserr4  = self.con0.apply_adjoint_hessian_21(self.pwork, v, np.hstack([self.uwork, z]),htol)
+        rhs         += tmp
+        q, aserr5    = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), htol)
+        q            = -q
         self.cnt['ninvJ1'] += 1
-        hv, herr1 = self.con0.apply_adjoint_jacobian_2(q, np.hstack([self.uwork, z]), htol)
+        hv, herr1   = self.con0.apply_adjoint_jacobian_2(q, np.hstack([self.uwork, z]), htol)
+        tmp,herr2   = self.obj0.hessVec_21(w,np.hstack([self.uwork,z]),htol)
+        hv         += tmp
+        tmp,herr3   = self.obj0.hessVec_22(v,np.hstack([self.uwork,z]),htol)
+        hv         += tmp
+        tmp,herr4   = self.con0.apply_adjoint_hessian_12(self.pwork,w,np.hstack([self.uwork,z]),htol)
+        hv         += tmp
+        tmp,herr5   = self.con0.apply_adjoint_hessian_22(self.pwork,v,np.hstack([self.uwork,z]),htol)
+        hv         += tmp
+        herr        = max(max(max(max(max(herr,herr1),herr2),herr3),herr4),herr5)
+
         return hv, max(herr1, aserr1, aserr5)
-    
+
     def profile(self):
         print("\nProfile Reduced Objective")
         print("  #state    #adjoint    #statesens    #adjointsens    #linearsolves")
@@ -130,12 +150,12 @@ class ReducedObjective:
         cnt['con'] = self.con0.profile()
         return cnt
 
-    
+
 
 
 # Objective function
 import numpy as np
-from scipy.sparse import csr_matrix
+# from scipy.sparse import csr_matrix
 
 
 class Objective:
@@ -144,38 +164,38 @@ class Objective:
 
     # Compute objective function value
     def value(self, x, ftol):
-        
-        
+
+
         nu = self.var['nu']
         M = self.var['M']
         R = self.var['R']
         alpha = self.var['alpha']
         ud = self.var['ud']
-        
-        u = x[:nu] 
-        z = x[nu:] 
-        
+
+        u = x[:nu]
+        z = x[nu:]
+
         diffu = u - ud[1:-1]
         uMu = diffu.T @ (M @ diffu)
         zRz = z.T @ (R @ z)
         val = 0.5 * (uMu + alpha * zRz)
         ferr = 0
-        
+
         return val, ferr
-    
+
     # Compute objective function gradient (w.r.t. u)
     def gradient_1(self, x, gtol):
         nu = self.var['nu']
         M = self.var['M']
         ud = self.var['ud']
         u = x[:nu]
-        
+
         diffu = u - ud[1:-1]
         g = M @ diffu
         gerr = 0
-        
+
         return g, gerr
-    
+
     # Compute objective function gradient (gradient_2)
     def gradient_2(self, x, gtol):
         nu = self.var['nu']
@@ -184,42 +204,42 @@ class Objective:
         z = x[nu:]
         g = alpha * (R @ z)
         gerr = 0
-        
+
         return g, gerr
-    
+
     # Apply objective function Hessian to a vector (hessVec_11)
     def hessVec_11(self, v, x, htol):
         M = self.var['M']
         hv = M @ v
         herr = 0
-        
+
         return hv, herr
-    
+
     # Apply objective function Hessian to a vector (hessVec_12)
     def hessVec_12(self, v, x, htol):
-        nu = self.var['nu']
-        hv = csr_matrix((nu, 1))
+        nu   = self.var['nu']
+        hv   = np.zeros((nu,))
         herr = 0
-        
+
         return hv, herr
-    
+
     # Apply objective function Hessian to a vector (hessVec_21)
     def hessVec_21(self, v, x, htol):
         nz = self.var['nz']
-        hv = csr_matrix((nz, 1))
+        hv   = np.zeros((nz,))
         herr = 0
-        
+
         return hv, herr
-    
+
     # Apply objective function Hessian to a vector (hessVec_22)
     def hessVec_22(self, v, x, htol):
         R = self.var['R']
         alpha = self.var['alpha']
         hv = alpha * (R @ v)
         herr = 0
-        
+
         return hv, herr
-    
+
 # Constraint
 
 import scipy.sparse as sp
@@ -227,49 +247,49 @@ import scipy.sparse as sp
 
 class ConstraintSolver:
     def __init__(self, var):
-        
+
         self.var = var
         self.uprev = np.ones(self.var['nu'])
-        
+
     def begin_counter(self,iter,cnt0):
         return cnt0
-    
+
     def end_counter(self,iter,cnt0):
         return cnt0
-        
+
 
     def solve(self, z, stol=1e-12):
         nu = self.var['nu']
         u = self.uprev
-        
-        
+
+
         c, _ = self.value(np.hstack([u,z]))
-        cnt = 0 
+        cnt = 0
         atol = stol
         rtol = 1
         cnorm = np.linalg.norm(c)
         ctol = min(atol, rtol * cnorm)
-        
+
         for _ in range(100):
             s,_ = self.apply_inverse_jacobian_1(self.value(np.hstack([u, z]))[0], np.hstack([u, z]))
-            
+
             unew = u - s
             cnew = self.value(np.hstack([unew, z]))[0]
             ctmp = np.linalg.norm(cnew)
-            
+
             alpha = 1
             while ctmp > (1 - 1e-4 * alpha) * cnorm:
                 alpha *= 0.1
                 unew = u - alpha * s
                 cnew = self.value(np.hstack([unew, z]))[0]
                 ctmp = np.linalg.norm(cnew)
-            
+
             u, c, cnorm = unew, cnew, ctmp
             cnt += 1
             if cnorm < ctol:
                 break
         serr = cnorm
-        
+
         self.uprev = u
         return u,cnt,serr
 
@@ -289,7 +309,7 @@ class ConstraintSolver:
         nu = self.var['nu']
         A = self.var['A']
         u = x[:nu]
-        
+
         J = self.evaluate_nonlinearity_jacobian(u)
         return (A + J) @ v, 0
 
@@ -310,9 +330,9 @@ class ConstraintSolver:
         nu = self.var['nu']
         A = self.var['A']
         u = x[:nu]
-        
+
         J = self.evaluate_nonlinearity_jacobian(u)
-        
+
         solution = sp.linalg.spsolve(A+J,v)
         return solution, 0
 
@@ -351,34 +371,34 @@ class ConstraintSolver:
 
     def evaluate_nonlinearity_jacobian(self, u):
         n = self.var['n']
-        
-        
-       
+
+
+
         d1, d2, d3 = np.zeros(n - 1), np.zeros(n - 1), np.zeros(n - 1)
-       
-        d1[:-1] = u[:-1] - u[1:]
+
+        d1[:-1] = -2*u[:-1] - u[1:]
         d2[0] = u[1]
         d2[1:-1] = u[2:]-u[:-2]
         d2[-1] =  -u[-2]
         d3[1:] = u[:-1] + 2 * u[1:]
         J = spdiags([d1, d2, d3], [-1, 0, 1], n-1, n-1) / 6
-        
+
         return J
 
     def profile(self):
         return []
-    
-    
-    
+
+
+
 # Set up Burgers
 from scipy.sparse import spdiags, diags,lil_matrix
 from scipy.integrate import quad
 
 class BurgersSetup:
     """
-    
+
     Solve the Burgers, distributed control problem
-    
+
     """
     def __init__(self, n, mu, alpha, beta, usepc=True):
         if n <= 1:
@@ -392,7 +412,7 @@ class BurgersSetup:
         self.h = 1 / (n + 1)
         self.u0 = 0
         self.u1 = -1
-        
+
         # Build stiffness matrix
         o = -np.ones(n - 1) / self.h
         d = 2 * np.ones(n - 1) / self.h
@@ -402,12 +422,12 @@ class BurgersSetup:
         A1 = lil_matrix((n-1,n-1))
         A1[n-2,n-2] = self.u1 / 6
         A1 = A1.tocsc()
-        
+
         d0 = np.zeros(n - 1)
         d0[0] = -self.u0 * (self.u0 / 6 + mu / self.h)
         d1 = np.zeros(n - 1)
         d1[-1] = self.u1 * (self.u1 / 6 - mu / self.h)
-        
+
         self.A = mu * spdiags([o, d, o], [-1, 0, 1], n - 1, n - 1).tocsc() + A0 + A1
 
         # Build state observation matrix
@@ -471,12 +491,12 @@ class BurgersSetup:
             b[i] = quad(F1, x0, x1)[0] + quad(F2, x1, x2)[0]
 
         return b
-    
+
 # Example usage
 Burgers = BurgersSetup(n=512, mu=0.08, alpha=1e-4, beta=1e-2)
 n = Burgers.n
 nu = Burgers.n - 1
-nz = Burgers.n 
+nz = Burgers.n
 alpha = Burgers.alpha
 beta = Burgers.beta
 M = Burgers.M
@@ -538,13 +558,13 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     params.setdefault('lam_max', 1e12)
     params.setdefault('t', 1)
     params.setdefault('gtol', np.sqrt(np.finfo(float).eps))
-    
+
     safeguard = 1e2 * np.finfo(float).eps
-    
+
     x0 = x
     g0 = dgrad
     snorm = 0
-    
+
     # Evaluate model at GCP
     sHs = 0
     gs = 0
@@ -552,26 +572,26 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     phiold = phi
     valnew = valold
     phinew = phiold
-    
+
     t0 = max(params['lam_min'], min(params['lam_max'], params['t'] / problem.pvector.norm(dgrad)))
-    
+
     # Set exit flag
     iter_count = 0
     iflag = 1
-    
+
     for iter0 in range(1, params['maxitsp'] + 1):
         snorm0 = snorm
-        
+
         # Compute step
         x1 = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
         s = x1 - x0
-        
+
         # Check optimality conditions
         gnorm = problem.pvector.norm(s)
         if gnorm / t0 <= params.get('tolsp', 0) and iter_count > 1:
             iflag = 0
             break
-        
+
         # Compute relaxation parameter
         alphamax = 1
         snorm = problem.pvector.norm(x1 - x)
@@ -579,16 +599,16 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
             ds = problem.pvector.dot(s, x0 - x)
             dd = gnorm ** 2
             alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
-        
+
         #Hs = red_obj.hessVec(v, z, htol)[0]
         Hs = problem.obj_smooth.hessVec(s, x, params['gtol'])[0]
-        
+
         sHs = problem.dvector.apply(Hs, s)
         g0s = problem.pvector.dot(g0, s)
         phinew = problem.obj_nonsmooth.value(x1)
         #eps = 1e-12
         alpha0 = max(-(g0s + phinew - phiold), gnorm ** 2 / t0) / sHs
-        
+
         if sHs <= safeguard:
             alpha = alphamax
             if 0.5 * alphamax < alpha0 and iter0 > 1:
@@ -600,7 +620,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
                 break
         else:
             alpha = min(alphamax, alpha0)
-        
+
         # Update iterate
         if alpha == 1:
             x0 = x1
@@ -612,38 +632,38 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
             valnew = valold + alpha * g0s + 0.5 * alpha ** 2 * sHs
             phinew = problem.obj_nonsmooth.value(x0)
             snorm = problem.pvector.norm(x0 - x)
-        
+
         # Update model information
         valold = valnew
         phiold = phinew
-        
+
         # Check step size
         if snorm >= params['delta'] - safeguard:
             iflag = 2
             break
-        
+
         norm_g0 = problem.pvector.norm(g0)
-        
+
         # Update spectral step length
         if sHs <= safeguard:
             #if norm_g0 == 0:
                 #norm_g0 = eps
-                
+
             lambdaTmp = params['t'] / norm_g0
-            
+
         else:
             lambdaTmp = gnorm ** 2 / sHs
-        
+
         t0 = max(params['lam_min'], min(params['lam_max'], lambdaTmp))
-    
+
     s = x0 - x
     pRed = (val + phi) - (valnew + phinew)
-    
+
     iter_count = max(iter_count, iter0)
-    
+
     return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
 
-# Example Problem Class 
+# Example Problem Class
 
 
 class L2vectorPrimal:
@@ -677,23 +697,23 @@ class L2vectorDual:
 
     def dual(self, x):
         return x / self.var['Rlump']
-    
+
 class ObjectiveNonSmooth:
     """
-    
+
     nonsmooth term of obj i.e. beta*\int_{\Omega}|z|\,dx
-    
+
     """
     def __init__(self, var):
         self.var = var
-        
+
     def prox(self, x, t):
-        return self.var['beta'] * np.sign(x) * np.maximum(np.abs(x) - 1e-2 * t, 0)
+        return self.var['beta'] * np.sign(x) * np.maximum(np.abs(x) - t, 0)
 
     def value(self, x):
         return self.var['beta']*np.linalg.norm(x)
 
-    
+
 
 
 class L1Norm:
@@ -735,9 +755,9 @@ class L1Norm:
 
     def get_parameter(self):
         return self.var['beta']
-    
-        
-    
+
+
+
 class Problem:
     def __init__(self):
         self.pvector = L2vectorPrimal(var)
@@ -745,7 +765,7 @@ class Problem:
         #self.obj_smooth = ReducedObjective(obj, con)
         self.obj_smooth = red_obj
         self.obj_nonsmooth = L1Norm(var)
-        
+
 
 #Example usage
 # Initial guess for the control vector
@@ -895,7 +915,7 @@ def trustregion(x0, problem, params):
     # Initialize secant if needed
     #if params['useSecant'] or params['useSecantPrecond']:
     #    problem.secant = SR1(params['secantSize'], params['useDefault'], params['initScale'])
-        
+
 
     if params['useSecantPrecond']:
         problem.prec.apply = lambda x: problem.secant.apply(x, problem.pvector, problem.dvector)
@@ -1105,7 +1125,7 @@ def compute_gradient(x, problem, params, cnt):
 #Example usage
 def set_default_parameters(name):
     params = {}
-    
+
     # General Parameters
     params['spsolver'] = name.replace(' ', '')
     params['outFreq'] = 1
@@ -1113,14 +1133,14 @@ def set_default_parameters(name):
     params['initProx'] = False
     params['t'] = 1
     params['safeguard'] = np.sqrt(np.finfo(float).eps)
-    
+
     # Stopping tolerances
     params['maxit'] = 200
     params['reltol'] = True
     params['gtol'] = 1e-5
     params['stol'] = 1e-10
     params['ocScale'] = params['t']
-    
+
     # Trust-region parameters
     params['eta1'] = 0.05
     params['eta2'] = 0.9
@@ -1128,31 +1148,31 @@ def set_default_parameters(name):
     params['gamma2'] = 2.5
     params['delta'] = 50.0
     params['deltamax'] = 1e10
-    
+
     # Subproblem solve tolerances
     params['atol'] = 1e-5
     params['rtol'] = 1e-3
     params['spexp'] = 2
     params['maxitsp'] = 15
-    
+
     # GCP and subproblem solve parameter
     params['useGCP'] = False
     params['mu1'] = 1e-4
     params['beta_dec'] = 0.1
     params['beta_inc'] = 10.0
     params['maxit_inc'] = 2
-    
+
     # SPG and spectral GCP parameters
     params['lam_min'] = 1e-12
     params['lam_max'] = 1e12
-    
+
     # Inexactness parameters
     params['useInexactObj'] = False
     params['useInexactGrad'] = False
     params['gradTol'] = np.sqrt(np.finfo(float).eps)
-    
-    
-    
+
+
+
     return params
 
 
@@ -1176,21 +1196,21 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     """
     # Random directions for finite differences
     u = np.random.randn(*u0.shape)
-   
+
     udir = np.random.rand(*u0.shape)
-    
+
     z = np.random.randn(*z0.shape)
-    
+
     zdir = np.random.rand(*z0.shape)
-    
+
     lambda_ = np.random.randn(*(con.value(np.hstack([u, z]))[0]).shape)
 
     # Evaluate objective and constraint functions
     f = obj.value(np.hstack([u, z]), tol)[0]
-    
+
     df1 = obj.gradient_1(np.hstack([u, z]), tol)[0]
-    
-    
+
+
     df2 = obj.gradient_2(np.hstack([u, z]), tol)[0]
     c = con.value(np.hstack([u, z]), tol)[0]
     J1d = con.apply_jacobian_1(udir, np.hstack([u, z]), tol)[0]
@@ -1202,10 +1222,10 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     print("\n Objective gradient_1 check using finite differences (FDs)")
     print(" FD step size      grad'*v      FD approx.  absolute error")
     delta = 1
-    
+
     for d in range(13):
         f1 = obj.value(np.hstack([u + delta * udir, z]), tol)[0]
-        
+
         error = np.abs(np.dot(df1, udir) - ((f1 - f) / delta))
         print(f" {delta:12.6e}  {np.dot(df1, udir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
         delta /= 10
@@ -1227,7 +1247,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     delta = 1
     for d in range(13):
         g1 = obj.gradient_1(np.hstack([u + delta * udir, z]), tol)[0]
-        
+
         fd_approx = (g1 - df1) / delta
         error = np.linalg.norm(hv - fd_approx)
         print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1242,11 +1262,11 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
         g1 = obj.gradient_1(np.hstack([u, z + delta * zdir]), tol)[0]
         fd_approx = (g1 - df1) / delta
         fd_approx_for_norm = fd_approx.reshape(-1,1)
-        
-        
+
+
         error = np.linalg.norm(hv - fd_approx_for_norm)
-       
-        print(f" {delta:12.6e}     {sp.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
+
+        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
         delta /= 10
 
     # Check objective Hessian_21 using finite differences
@@ -1259,7 +1279,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
         fd_approx = (g1 - df2) / delta
         fd_approx_for_norm = fd_approx.reshape(-1,1)
         error = np.linalg.norm(hv - fd_approx_for_norm)
-        print(f" {delta:12.6e}     {sp.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
+        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
         delta /= 10
 
     # Check objective Hessian_22 using finite differences
@@ -1304,7 +1324,7 @@ def deriv_check_simopt(u0, z0, obj, con, tol):
     delta = 1
     for d in range(13):
         Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
-        
+
         fd_approx = (Jn - J1) / delta
         error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
         print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
@@ -1393,18 +1413,18 @@ def deriv_check(x, d, problem, tol):
     grad, _ = problem.obj_smooth.gradient(x, tol)
     gd = problem.dvector.apply(grad, d)
     t = 1
-    
+
     print('\n  Finite Difference Gradient Check')
     print('           t       DirDeriv        FinDiff         Error')
-    
+
     for i in range(13):
         xnew = x + t * d
-        
-        
+
+
         problem.obj_smooth.update(xnew, 'temp')
         valnew, _ = problem.obj_smooth.value(xnew, tol)
         fd = (valnew - val) / t
-        
+
         print(f'  {t:6.4e}    {gd: 6.4e}    {fd: 6.4e}    {abs(fd - gd):6.4e}')
         t *= 0.1
 
@@ -1412,17 +1432,17 @@ def deriv_check(x, d, problem, tol):
     hv, _ = problem.obj_smooth.hessVec(d, x, tol)
     hvnorm = problem.dvector.norm(hv)
     t = 1
-    
+
     print('\n  Finite Difference Hessian Check')
     print('           t        HessVec        FinDiff         Error')
-    
+
     for i in range(13):
         xnew = x + t * d
         problem.obj_smooth.update(xnew, 'temp')
         gradnew, _ = problem.obj_smooth.gradient(xnew, tol)
         fd = (gradnew - grad) / t
         fdnorm = problem.dvector.norm(fd)
-        
+
         print(f'  {t:6.4e}    {hvnorm: 6.4e}    {fdnorm: 6.4e}    {problem.dvector.norm(fd - hv):6.4e}')
         t *= 0.1
 
@@ -1431,7 +1451,7 @@ def deriv_check(x, d, problem, tol):
     hd2, _ = problem.obj_smooth.hessVec(d2, x, tol)
     vhd2 = problem.dvector.apply(hd2, d)
     d2hv = problem.dvector.apply(hv, d2)
-    
+
     print('\n  Hessian Symmetry Check')
     print(f'    <x,Hy> = {vhd2: 6.4e}')
     print(f'    <y,Hx> = {d2hv: 6.4e}')
@@ -1442,24 +1462,24 @@ def deriv_check(x, d, problem, tol):
 def vector_check(primal, dual, problem):
     print('\n  Vector Check')
     print('  Check Dual Consistency')
-    
+
     xp = problem.dvector.dual(dual)
     xpp = problem.pvector.dual(xp)
     err = problem.dvector.norm(dual - xpp)
     print(f'  norm(x-dual(dual(x))) = {err:.4e}')
-    
+
     xp = problem.pvector.dual(primal)
     xpp = problem.dvector.dual(xp)
     err = problem.pvector.norm(primal - xpp)
     print(f'  norm(y-dual(dual(y))) = {err:.4e}')
-    
+
     print('\n  Check Apply Consistency')
     xp = problem.pvector.dual(primal)
     xydot = problem.dvector.dot(xp, dual)
     xyapply = problem.dvector.apply(dual, primal)
     err = abs(xydot - xyapply)
     print(f' |x.dot(dual(y))-x.apply(y)| = {err:.4e}')
-    
+
     xp = problem.dvector.dual(dual)
     xydot = problem.pvector.dot(xp, primal)
     xyapply = problem.pvector.apply(primal, dual)
@@ -1493,13 +1513,13 @@ def driver(savestats, name):
     # Set up optimization problem
     n = 512  # Number of cells
     nu = 0.08  # Viscosity
-    alpha = 1e-4  # L2 penalty parameter
+    alpha = 1e-2  # L2 penalty parameter
     beta = 1e-2  # L1 penalty parameter
     usepc = True  # Use piecewise constant controls
     useInexact = False
     derivCheck = True
 
-    
+
     obj = Objective(var)
     con = ConstraintSolver(var)
     var['useEuclidean'] = False
@@ -1543,13 +1563,13 @@ def driver(savestats, name):
     con.reset()
     x, cnt_tr = trustregion(x0, problem, params)
     elapsed_time = time.time() - start_time
-    
+
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
     pro_tr = problem.obj_smooth.profile()
 
     cnt[1] = (cnt_tr, pro_tr)
-    
+
 
     print("\nSummary")
     print(
