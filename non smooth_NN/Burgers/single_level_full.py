@@ -325,7 +325,7 @@ class ConstraintSolver:
 
     def apply_adjoint_hessian_11(self, u, v, x,htol=1e-6):
         nu = self.var['nu']
-        ahuv = np.zeros(nu)
+        ahuv = [0.0] * nu
         for i in range(nu):
             if i < nu - 1:
                 ahuv[i] += (u[i] * v[i + 1] - u[i + 1] * (2 * v[i] + v[i + 1])) / 6
