@@ -958,11 +958,10 @@ def trustregion(x0, problem, params):
 
         # Solve trust-region subproblem
         params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
-        dgrad = problem.dvector.dual(grad)
-        s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_SPG2(
-            x, val, dgrad, phi, problem, params, cnt
-        )
 
+        s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(
+            x, val, grad, phi, problem, params, cnt
+        )
         # Update function information
         xnew = x + s
         problem.obj_smooth.update(xnew, 'trial')
@@ -1039,6 +1038,7 @@ def trustregion(x0, problem, params):
     print(f"Total time: {cnt['timetotal']:8.6e} seconds")
 
     return x, cnt
+
 
 
 def compute_value(x, xprev, fvalprev, obj, pRed, params, cnt):
@@ -1181,7 +1181,18 @@ def set_default_parameters(name):
 # Print results
 #print("\nOptimized solution:", z_opt)
 
+def trustregion_step(x,val,grad,phi,problem,params,cnt):
+    #can modify this to either run step or create different model?
+    problemTR               = Problem()
+    problemTR.obj_smooth    = modelTR(problem,params["useSecant"])
+    problemTR.obj_nonsmooth = phiPrec(problem)
+    dgrad                   = problemTR.dvector.dual(grad)
 
+    s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(
+        x, val, dgrad, phi, problemTR, params, cnt)
+    cnt = problemTR.obj_smooth.addCounter(cnt)
+    cnt = problemTR.obj_nonsmooth.addCounter(cnt)
+    return s, snorm, pRed, phinew, iflag, iter, cnt, params
 
 def deriv_check_simopt(u0, z0, obj, con, tol):
     """
@@ -1486,8 +1497,71 @@ def vector_check(primal, dual, problem):
     err = abs(xydot - xyapply)
     print(f' |y.dot(dual(x))-y.apply(x)| = {err:.4e}')
 
+class modelTR:
+    def __init__(self, problem, secant):
+        self.problem = problem
+        self.secant  = secant #just dummy for now unless we want to test bfgs Hessians
 
-#print(vector_check(z, z_opt, problem))
+        self.nobj1 = 0
+        self.ngrad = 0
+        self.nhess = 0
+
+    def update(self, x, type):
+        self.problem.obj_smooth.update(x, type)
+    def value(self, x, ftol):
+        val, _          = self.problem.obj_smooth.value(x, ftol)
+        self.nobj1 += 1
+        ferr            = 0
+        return val, ferr
+    def gradient(self,x,gtol):
+        grad            = self.problem.obj_smooth.gradient(x, gtol)
+        self.ngrad += 1
+        gerr            = 0
+        return grad, gerr
+    def hessVec(self,v,x,htol):
+        if (self.secant):
+          hv   = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
+          herr = 0
+        else:
+          hv, herr        = self.problem.obj_smooth.hessVec(v,x,htol)
+          self.nhess += 1
+        return hv, herr
+    def addCounter(self,cnt):
+        #actually zero because you should eval in subprob?
+        cnt["nobj1"] += 0
+        cnt["ngrad"] += 0
+        cnt["nhess"] += 0
+        return cnt
+
+
+class phiPrec: # you can definitely clean this up and inherit a bunch of stuff but
+               # we can be explicit for now
+    def __init__(self, problem):
+        self.problem   = problem
+        self.var       = problem.obj_nonsmooth.var
+        self.nobj2     = 0
+        self.nprox     = 0
+    def value(self, x):
+        val             = self.problem.obj_nonsmooth.value(x)
+        self.nobj2     += 1
+        return val
+    def prox(self, x, t):
+        px          = self.problem.obj_nonsmooth.prox(x, t)
+        self.nprox += 1
+        return px
+    def addCounter(self, cnt):
+        cnt["nobj2"] += self.nobj2
+        cnt["nprox"] += self.nprox
+        return cnt
+    def genJacProx(self, x, t):
+        D, ind = self.problem.obj_nonsmooth.genJacProx(x, t)
+        return D, ind
+    def applyProxJacobian(self, v, x, t):
+        Dv = self.problem.obj_nonsmooth.applyProxJacobian(v, x, t)
+        return Dv
+    def getParameter(self):
+        return self.problem.obj_nonsmooth.getParameter()
+
 
 
 class Euclidean:
@@ -1513,7 +1587,7 @@ def driver(savestats, name):
     # Set up optimization problem
     n = 512  # Number of cells
     nu = 0.08  # Viscosity
-    alpha = 1e-2  # L2 penalty parameter
+    alpha = 1e-4  # L2 penalty parameter
     beta = 1e-2  # L1 penalty parameter
     usepc = True  # Use piecewise constant controls
     useInexact = False
