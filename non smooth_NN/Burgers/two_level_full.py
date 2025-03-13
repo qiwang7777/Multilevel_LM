@@ -753,7 +753,8 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
     s_low = x0_low - x_low
     s = R_res.T @ s_low
     snorm = problem.pvector.norm(s)
-    pRed = (val + phi) - (valnew_low + phinew)-np.dot(Rgrad - dgrad_low,s_low)
+    pRed = (val+phi)-(valnew + phinew)
+    #pRed = (val + phi) - (valnew_low + phinew)-np.dot(Rgrad - dgrad_low,s_low)
 
     iter_count = max(iter_count, iter0)
 
@@ -1057,7 +1058,7 @@ def trustregion(R_res,x0, problem_low,problem, params):
         params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
 
         s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_two_level(
-            R_res, x,val,grad_low,grad,phi,problem_low,problem,params,cnt
+            R_res, x,val,R_res@grad,grad,phi,problem_low,problem,params,cnt
         )
         # Update function information
         xnew = x + s
@@ -1065,8 +1066,8 @@ def trustregion(R_res,x0, problem_low,problem, params):
         problem.obj_smooth.update(xnew, 'trial')
         #valnew, val, cnt = compute_value(xnew, x, val, problem.obj_smooth, pRed, params, cnt)
         f_low,_,_ = compute_value(xnew_low,x_low,val_low,problem_low.obj_smooth,pRed,params,cnt)
-        valnew_low = f_low+ np.dot(R_res@grad-grad_low,s_low)
-        print(valnew_low)
+        valnew_low = f_low#+ np.dot(R_res@grad-grad_low,s_low)
+        #print(valnew_low)
         #print(valnew)
 
         # Accept/reject step and update trust-region radius
