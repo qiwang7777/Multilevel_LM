@@ -418,13 +418,17 @@ class L1Norm:
         self.var = var
 
     def value(self, x):
-        return self.var['beta'] * np.dot(self.var['Rlump'].T, np.abs(x))
+        val = 0
+        for k, v in x.td.items():
+            val += torch.sum(torch.abs(v))
+        return self.var['beta'] * val
 
     def prox(self, x, t):
-        if self.var['useEuclidean']:
-            return np.maximum(0, np.abs(x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(x)
-        else:
-            return np.maximum(0, np.abs(x) - t * self.var['beta']) * np.sign(x)
+        temp = x.clone()
+        for k, v in x.td.items():
+            temp.td[k] = torch.max(torch.tensor([0.0]), torch.abs(v) - t*self.var['beta'])*torch.sign(v)
+        # return np.maximum(0, np.abs(x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(x)
+        return temp
 
     def dir_deriv(self, s, x):
         sx = np.sign(x)
@@ -455,6 +459,7 @@ class L1Norm:
 
 class Problem:
     def __init__(self, var):
+        self.var = var
         self.pvector = L2vectorPrimal(var)
         self.dvector = L2vectorDual(var)
         self.obj_smooth = NNObjective(var)
@@ -827,7 +832,7 @@ def set_default_parameters(name):
 
 def trustregion_step(x,val,grad,phi,problem,params,cnt):
     #can modify this to either run step or create different model?
-    problemTR               = Problem()
+    problemTR               = Problem(problem.var)
     problemTR.obj_smooth    = modelTR(problem,params["useSecant"])
     problemTR.obj_nonsmooth = phiPrec(problem)
     dgrad                   = problemTR.dvector.dual(grad)
@@ -1245,7 +1250,7 @@ def driver(savestats, name):
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
-    pro_tr = problem.obj_smooth.profile()
+    pro_tr = [] #problem.obj_smooth.profile()
 
     cnt[1] = (cnt_tr, pro_tr)
 
