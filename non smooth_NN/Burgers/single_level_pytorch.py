@@ -6,9 +6,9 @@ import torch.nn as nn
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(FullyConnectedNN, self).__init__()
-        self.fc1 = nn.Linear((input_dim+1)**2, hidden_dim)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, (output_dim+1)**2)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
         self.activation = nn.Sigmoid() #changable
 
     def forward(self, x):
@@ -23,12 +23,13 @@ class NNObjective:
     def update(self, x, type):
         return None
     # Compute objective function value
-    def value(self, x, ftol):
-
-        #x is the parameters of model
-        print(x, self.var['mesh'])
-        nn = torch.func.functional_call(self.var['NN'], x, (self.var['mesh'],))
-        f_domain = self.f_value_list
+    def value_torch(self, x, ftol):
+        if isinstance(x,  TorchVect):
+            nn = torch.func.functional_call(self.var['NN'], x.td, (self.var['mesh'],))
+        else:
+          #x is the parameters of model
+          nn = torch.func.functional_call(self.var['NN'], x, (self.var['mesh'],))
+        f_domain = self.var['b']
         pde = torch.matmul(self.var['A'], nn.T)
         # pde_residual = pde[self.domain_mask] - f_domain
         pde_residual = pde - f_domain.T
@@ -38,38 +39,37 @@ class NNObjective:
         # loss_reg = self.reg_param * sum(param.abs().sum() for param in x.values())
 
         # loss = loss_pde+loss_boundary+loss_reg
-        val = loss_pde
-        #print(f" losst:{loss}")
+        val = loss_pde.squeeze() # reduce dims for some reason
         #loss = loss_boundary
-        ferr = 0
+        return val
 
+    def value(self, x, ftol):
+        val = self.value_torch(x, ftol)
+        ferr = 0.
         return val, ferr
 
     # Compute objective function gradient (w.r.t. u)
     def gradient(self, x, gtol):
-        valfunc = lambda t: self.value(t, gtol)
-
-        g = torch.func.grad(valfunc, gtol)
+        if isinstance(x,  TorchVect):
+          grad = self.torch_gradient(x.td, gtol)
+        else:
+          grad = self.torch_gradient(x, gtol)
         gerr = 0
-        return g, gerr
-    def forwardoverrev(input, x, v):
-        return torch.func.jvp(input, (x,), (v,))
+        return TorchVect(grad), gerr
+
+    def torch_gradient(self, x, gtol):
+        valfunc = lambda t: self.value_torch(t, gtol)
+        g = torch.func.grad(valfunc)
+        grad = g(x)
+        return grad
 
     # Apply objective function Hessian to a vector (hessVec_11)
     def hessVec(self, v, x, htol):
 
-        valfunc = lambda t: PDEObj.loss(t)
+        gfunc = lambda t: self.torch_gradient(t, htol)
+        _, ans = torch.func.jvp(gfunc, (x.td,), (v.td,))
 
-        torch_gradient = torch.func.grad(valfunc)
-        # print(torch_gradient(x))
-        def forwardoverrev(input, x, v):
-            return torch.func.jvp(input, (x,), (v,))
-
-        def hessVec(v, x):
-            _, ans = forwardoverrev(torch_gradient, x, v)
-            return ans
-
-        return hessVec(v,x), 0
+        return TorchVect(ans), 0
 
 
 # Set up BB
@@ -91,7 +91,7 @@ class NNSetup:
         self.V      = dolfinx.fem.functionspace(self.domain, ("Lagrange", 1))
         # Source term
         self.f      = dolfinx.fem.Constant(self.domain, dolfinx.default_scalar_type(-6))
-        self.inputs = torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float32).T
+        self.inputs = torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
 
         # Boundary condition
         self.u_D = dolfinx.fem.Function(self.V)
@@ -107,6 +107,7 @@ class NNSetup:
         self.mu    = mu
 
         self.NN    = FullyConnectedNN((n+1)**2, 100, (n+1)**2)
+        self.NN.to(torch.float64)
         t = self.generate_fenics_data()
         self.kappa_value_list  = t[0]
         self.f_value_list      = t[1]
@@ -173,8 +174,8 @@ class NNSetup:
 
             ut = dolfinx.fem.Function(V)
             ut.x.array[:] = np.linalg.solve(AT, b.x.array)
-            self.A            = AT.to(dtype=torch.float32)
-            self.M            = MT.to(dtype=torch.float32)
+            self.A            = AT.to(dtype=torch.float64)
+            self.M            = MT.to(dtype=torch.float64)
             u_array           = uh.x.array[:]
 
             kappa_values      = [] #K.x.array[:]
@@ -189,9 +190,9 @@ class NNSetup:
             u_solution_list.append(u_array)
 
 
-        kappa_value_list  = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
-        f_value_list      = torch.tensor(np.array(f_value_list), dtype=torch.float32)
-        u_solution_tensor = torch.tensor(np.array(u_solution_list),dtype=torch.float32)
+        kappa_value_list  = torch.tensor(np.array(kappa_value_list), dtype=torch.float64)
+        f_value_list      = torch.tensor(np.array(f_value_list), dtype=torch.float64)
+        u_solution_tensor = torch.tensor(np.array(u_solution_list),dtype=torch.float64)
 
 
         return  kappa_value_list, f_value_list, u_solution_tensor
@@ -211,7 +212,7 @@ class NNSetup:
              'b':self.f_value_list,
              'ud':self.u_solution_tensor,
              'useEuclidean':useEuclidean,
-             'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float32).T
+             'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
 
             }
       return var
@@ -333,58 +334,83 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 class L2vectorPrimal:
     def __init__(self, var):
         self.var = var
-
+    @torch.no_grad()
     def dot(self, x, y):
         ans = 0
-        for k, v in x.items():
-            ans += torch.sum(torch.mul(v, y[k]))
+        for k, v in x.td.items():
+            ans += torch.sum(torch.mul(v, y.td[k]))
         return ans.item()
-
+    @torch.no_grad()
     def apply(self, x, y):
         return self.dot(x, y)
-
+    @torch.no_grad()
     def norm(self, x):
         return np.sqrt(self.dot(x, x))
-
+    @torch.no_grad()
     def dual(self, x):
         return x
 
 class L2vectorDual:
     def __init__(self, var):
         self.var = var
-
+    @torch.no_grad()
     def dot(self, x, y):
         ans = 0
-        for k, v in x.items():
-            ans += torch.sum(torch.mul(v, y[k]))
+        for k, v in x.td.items():
+            ans += torch.sum(torch.mul(v, y.td[k]))
         return ans.item()
-
+    @torch.no_grad()
     def apply(self, x, y):
         return self.dot(x,y)
-
+    @torch.no_grad()
     def norm(self, x):
         return np.sqrt(self.dot(x, x))
-
+    @torch.no_grad()
     def dual(self, x):
         return x
 
 import copy
-class params:
+class TorchVect:
     def __init__(self, tensordict): #store tensor dictionary
         self.td = tensordict
+    @torch.no_grad()
     def clone(self):
-        td = copy.deepcopy(self.td)
-        ans = params(td)
+        td  = copy.deepcopy(self.td)
+        ans = TorchVect(td)
         ans.zero()
         return ans
+    @torch.no_grad()
     def zero(self):
-        for _, v in self.tensor_dict.items():
-            v.zero()
+        for _, v in self.td.items():
+            v.zero_()
+    @torch.no_grad()
     def __add__(self, other):
-        t = other.copy()
         for k, v in self.td.items():
-            t.td[k].add_(v)
-        return t
+            other.td[k].add_(v)
+        return other
+    @torch.no_grad()
+    def __sub__(self, other):
+        for k, v, in self.td.items():
+            other.td[k].sub_(v)
+        return -1*other
+    @torch.no_grad()
+    def __mul__(self, alpha):
+      ans = self.clone()
+      for k, v in self.td.items():
+          ans.td[k].add_(v, alpha = alpha)
+      return ans
+    @torch.no_grad()
+    def __rmul__(self, alpha):
+        return self.__mul__(alpha)
+    @torch.no_grad()
+    def __truediv__(self, alpha):
+        ans = self.clone()
+        for k, v in self.td.items():
+            ans.td[k].add_(v, alpha = 1/alpha)
+        return ans
+    @torch.no_grad()
+    def __rtruediv__(self, alpha):
+        return self.__truediv__(alpha)
 
 class L1Norm:
     def __init__(self, var):
@@ -1073,7 +1099,12 @@ def deriv_check(x, d, problem, tol):
         t *= 0.1
 
     problem.obj_smooth.update(x, 'temp')
-    d2 = np.random.randn(*d.shape)  # Random d2 of the same shape as d
+    if isinstance(d, TorchVect):
+      d2 = d.clone()
+      for k, v in d2.td.items():
+          d2.td[k] = torch.randn(v.size(), dtype=torch.float64)
+    else:
+      d2 = np.random.randn(*d.shape)  # Random d2 of the same shape as d
     hd2, _ = problem.obj_smooth.hessVec(d2, x, tol)
     vhd2 = problem.dvector.apply(hd2, d)
     d2hv = problem.dvector.apply(hv, d2)
@@ -1190,15 +1221,15 @@ def driver(savestats, name):
     var   = nnset.returnVars(False)
     problem = Problem(var)
     if derivCheck:
-        x = nnset.NN.state_dict()
-        d = x.copy() #just to get something to multiply against
+        x =  TorchVect(nnset.NN.state_dict())
+        d = x.clone() #just to get something to multiply against
         #inputs = PDEObj.input_data()[2]
-        for key, vals in d.items():
-          d[key] = vals.copy_(torch.randn(vals.size()))
+        for key, vals in d.td.items():
+          d.td[key] = vals.copy_(torch.randn(vals.size()))
         deriv_check(x, d, problem, 1e-4 * np.sqrt(np.finfo(float).eps))
         vector_check(x, d, problem)
 
-    x0 = nnset.NN.model.state_dict()
+    x0 =  TorchVect(nnset.NN.state_dict())
     cnt = {}
 
     # Update default parameters
@@ -1209,7 +1240,6 @@ def driver(savestats, name):
 
     # Solve optimization problem
     start_time = time.time()
-    problem.obj_smooth.reset()
     x, cnt_tr = trustregion(x0, problem, params)
     elapsed_time = time.time() - start_time
 
