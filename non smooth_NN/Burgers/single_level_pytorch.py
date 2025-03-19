@@ -63,12 +63,10 @@ class NNObjective:
         grad = g(x)
         return grad
 
-    # Apply objective function Hessian to a vector (hessVec_11)
     def hessVec(self, v, x, htol):
 
         gfunc = lambda t: self.torch_gradient(t, htol)
         _, ans = torch.func.jvp(gfunc, (x.td,), (v.td,))
-
         return TorchVect(ans), 0
 
 
@@ -371,6 +369,7 @@ class L2vectorDual:
 
 import copy
 class TorchVect:
+    @torch.no_grad()
     def __init__(self, tensordict): #store tensor dictionary
         self.td = tensordict
     @torch.no_grad()
@@ -385,14 +384,16 @@ class TorchVect:
             v.zero_()
     @torch.no_grad()
     def __add__(self, other):
+        temp = other.clone()
         for k, v in self.td.items():
-            other.td[k].add_(v)
-        return other
+            temp.td[k] = other.td[k] + v
+        return temp
     @torch.no_grad()
     def __sub__(self, other):
+        temp = other.clone()
         for k, v, in self.td.items():
-            other.td[k].sub_(v)
-        return -1*other
+           temp.td[k] = other.td[k] - v
+        return -1*temp
     @torch.no_grad()
     def __mul__(self, alpha):
       ans = self.clone()
@@ -1092,9 +1093,8 @@ def deriv_check(x, d, problem, tol):
         xnew = x + t * d
         problem.obj_smooth.update(xnew, 'temp')
         gradnew, _ = problem.obj_smooth.gradient(xnew, tol)
-        fd = (gradnew - grad) / t
+        fd = (gradnew - grad)/t
         fdnorm = problem.dvector.norm(fd)
-
         print(f'  {t:6.4e}    {hvnorm: 6.4e}    {fdnorm: 6.4e}    {problem.dvector.norm(fd - hv):6.4e}')
         t *= 0.1
 
