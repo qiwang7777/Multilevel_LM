@@ -20,6 +20,14 @@ class FullyConnectedNN(nn.Module):
 class NNObjective:
     def __init__(self, var):
         self.var = var
+        self.cnt = {
+            'nns': 0, 'nngrad': 0
+        }
+    def profile(self):
+        print("\nProfile Objective")
+        print("  #nns    #nngrad ")
+        print(f"  {self.cnt['nns']:6d}      {self.cnt['nngrad']:6d}")
+        return self.cnt
     def update(self, x, type):
         return None
     # Compute objective function value
@@ -40,6 +48,7 @@ class NNObjective:
 
         # loss = loss_pde+loss_boundary+loss_reg
         val = loss_pde.squeeze() # reduce dims for some reason
+        self.cnt['nns'] += 1
         #loss = loss_boundary
         return val
 
@@ -54,6 +63,7 @@ class NNObjective:
           grad = self.torch_gradient(x.td, gtol)
         else:
           grad = self.torch_gradient(x, gtol)
+        self.cnt['nngrad'] += 1
         gerr = 0
         return TorchVect(grad), gerr
 
@@ -76,6 +86,8 @@ from mpi4py import MPI
 import torch
 import dolfinx.fem.petsc
 import dolfinx.nls.petsc
+import copy
+import time
 
 class NNSetup:
     """
@@ -326,9 +338,6 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 
     return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
 
-# Example Problem Class
-
-
 class L2vectorPrimal:
     def __init__(self, var):
         self.var = var
@@ -367,7 +376,6 @@ class L2vectorDual:
     def dual(self, x):
         return x
 
-import copy
 class TorchVect:
     @torch.no_grad()
     def __init__(self, tensordict): #store tensor dictionary
@@ -464,8 +472,6 @@ class Problem:
         self.dvector = L2vectorDual(var)
         self.obj_smooth = NNObjective(var)
         self.obj_nonsmooth = L1Norm(var)
-
-import time
 
 def trustregion(x0, problem, params):
     """
@@ -1250,33 +1256,30 @@ def driver(savestats, name):
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
-    pro_tr = [] #problem.obj_smooth.profile()
+    pro_tr = problem.obj_smooth.profile()
 
     cnt[1] = (cnt_tr, pro_tr)
 
 
     print("\nSummary")
     print(
-        "           niter     nobjs     ngrad     nhess     nobjn     nprox     nstat     nadjo     nssen     nasen"
+        "           niter     nobjs     ngrad     nhess     nobjn     nprox     nns     nngrad"
     )
     print(
         f"   SGP2:  {cnt[1][0]['iter']:6d}    {cnt[1][0]['nobj1']:6d}    {cnt[1][0]['ngrad']:6d}    {cnt[1][0]['nhess']:6d}    "
-        f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}    {cnt[1][1]['nstate']:6d}    {cnt[1][1]['nadjoint']:6d}    "
-        f"{cnt[1][1]['nstatesens']:6d}    {cnt[1][1]['nadjointsens']:6d}"
+        f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}    {cnt[1][1]['nns']:6d}    {cnt[1][1]['nngrad']:6d}"
     )
 
-    mesh = 0.5 * (var['mesh'][:-1] + var['mesh'][1:]) if usepc else var['mesh']
+    # Plot results - plot results properly
+    # import matplotlib.pyplot as plt
 
-    # Plot results
-    import matplotlib.pyplot as plt
-
-    plt.figure()
-    plt.plot(mesh, x, "b", linewidth=3)
-    plt.xlabel("x")
-    plt.ylabel("z(x)")
-    plt.title("Optimal Control")
-    plt.grid()
-    plt.show()
+    # plt.figure()
+    # plt.plot(mesh, x, "b", linewidth=3)
+    # plt.xlabel("x")
+    # plt.ylabel("z(x)")
+    # plt.title("Optimal Control")
+    # plt.grid()
+    # plt.show()
 
     return cnt
 
