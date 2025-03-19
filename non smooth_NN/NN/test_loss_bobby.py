@@ -1,16 +1,20 @@
 #In this file, we generate the dataset, input dimension is 2 (spatial data in 2d) and output dimension is 1
 #To get all the values we need to put into loss function, including the value of kappa and f.
-import ufl
-from dolfinx import mesh, fem
-from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector, set_bc
+from fenics import *
+from dolfin import *
 
 import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 import torch.optim as optim
-import matplotlib.pyplot as plt
 
+
+# import pyvista
+import matplotlib.pyplot as plt
+np.set_printoptions(threshold=np.inf)
 
 # Fully connected neural network construction
 class FullyConnectedNN(nn.Module):
@@ -32,12 +36,12 @@ class PDEObjective:
         self.mshsize   = meshsize
         self.nsamps    = n_samples
         self.reg_param = reg_param
-                # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
+        # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
         self.mesh = UnitSquareMesh(meshsize, meshsize)
-        self.V = FunctionSpace(self.mesh, "Lagrange", 1)
-        self.vs = VectorFunctionSpace(self.mesh, "CG", 1)
+        self.V    = FunctionSpace(self.mesh, "CG", 1)
+        self.vs   = VectorFunctionSpace(self.mesh, "CG", 1)
         # Source term
-        self.f = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
+        self.f    = Expression("32*exp(-4*((x[0]-0.25)*(x[0]-0.25) + (x[1]-0.25)*(x[1]-0.25)))", degree=2)
 
         # u = project(Expression(("x[0]", "x[1]"), degree = 1), self.vs) #get coordinates?
         # T = TensorFunctionSpace(self.mesh, "DG", 0) #i think gradient is in tensor space 1 deg lower than originalvs
@@ -127,13 +131,18 @@ class PDEObjective:
             u = TrialFunction(V)
             v = TestFunction(V)
             # a = dot(kappa * grad(u), grad(v)) * dx
-            a = dot(kappa * grad(u), grad(v)) * dx
+            a = inner(kappa * grad(u), grad(v)) * dx
             L = self.f * v * dx
 
-            dxp = dx(metadata = {"quadrature_scheme":"vertex"})
-            A = dot(kappa*grad(u), grad(v))*dxp #kappa is throwing error
-            A = Form(A, bcs = self.bc)
-            A = assemble(A)
+            # dxp = dx(metadata = {"quadrature_scheme":"vertex"})
+            # uh  = Function(V)
+            # Ff = inner(kappa*grad(uh), grad(v))*dxp #kappa is throwing error
+            # J  = derivative(Ff, uh)
+            # F = Form(Ff, bcs = self.bc)
+            # A = derivative(F, u)
+            # A = assemble(A)
+            [A, b] = assemble_system(a, L, self.bc)
+            ut = np.linalg.solve(A.array(), b.get_local())
             # print(A.array())
             A = A.array()
             A = A.astype(np.float32)
@@ -142,26 +151,41 @@ class PDEObjective:
             u_sol = Function(self.V)
             solve(a == L, u_sol, self.bc)
             # Get the solution and input features
-            u_array           = u_sol.compute_vertex_values(self.mesh)
-            kappa_values      = kappa.compute_vertex_values(self.mesh)
+            u_array           = u_sol.vector().get_local() #u_sol.compute_vertex_values(self.mesh)
+            kappa_values      = project(kappa,V).vector().get_local() #kappa.compute_vertex_values(self.mesh)
+            f_values          = b #self.f.compute_vertex_values(self.mesh)
+            print(np.linalg.norm(np.dot(A, ut) - b))
+            print(np.linalg.norm(u_sol.vector().get_local() - ut))
 
-            f_values          = self.f.compute_vertex_values(self.mesh)
-            print(np.dot(A, u_array) - f_values)
-
-            kappa_domain      = kappa_values[self.domain_mask]
-            f_domain          = f_values[self.domain_mask]
+            kappa_domain      = kappa_values[self.domain_mask].T
+            f_domain          = f_values
 
             kappa_value_list.append(kappa_domain)
             f_value_list.append(f_domain)
-            u_solution_list.append(u_array)
+            u_solution_list.append(u_sol.compute_vertex_values(self.mesh))
 
 
         # kappa_grad_list = torch.tensor(np.array(kappa_grad_list), dtype=torch.float32)
-        kappa_value_list = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
-        f_value_list= torch.tensor(np.array(f_value_list), dtype=torch.float32)
+        kappa_value_list  = torch.tensor(np.array(kappa_value_list), dtype=torch.float32)
+        f_value_list      = torch.tensor(np.array(f_value_list), dtype=torch.float32)
         u_solution_tensor = torch.tensor(np.array(u_solution_list),dtype=torch.float32)
-
-
+        # t = Function(V)
+        # temp.setlocal(u_solution_tensor)
+        # print(temp[self.domain_mask].size())
+        # real_solution_grid      = u_solution_tensor[0].reshape(self.mshsize + 1, self.mshsize + 1).numpy()
+        # fig, axes = plt.subplots(1, 1, figsize=(18, 6))
+        # # Real solution
+        # ax = axes
+        # temp = f_domain.get_local()
+        # print(self.mesh.dofs)
+        # im = ax.imshow(temp.reshape(self.mshsize+1, self.mshsize+1), extent=[0, 1, 0, 1], origin="lower", cmap="viridis")
+        # ax.set_title("Real Solution (FEniCS)")
+        # ax.set_xlabel("x")
+        # ax.set_ylabel("y")
+        # fig.colorbar(im, ax=ax)
+        # plt.tight_layout()
+        # plt.show()
+        # stp
         return  kappa_value_list, f_value_list, u_solution_tensor
         #Size of the results from function generate_fenics_data
         #inputs_domain : spatial data (x,y) with size of [1,(meshsize-1)**2,2], there are (meshsize-1)**2 points in interior and the spatial data is in 2d
@@ -179,15 +203,20 @@ class PDEObjective:
         f_domain = self.f_value_list
         pde = torch.matmul(self.A,nn)
         #I suppose we can also domain_mask A?
-        pde_residual = pde[self.domain_mask] - f_domain
-
-        loss_pde = torch.mean(pde_residual**2)
-
-        loss_boundary = torch.mean(pde[self.boundary_mask])**2
+        # pde_residual = pde[self.domain_mask].T - f_domain
+        pde_residual = pde - f_domain
+        # print(pde[self.domain_mask].size(), f_domain.size())
+        # print(pde_residual.size())
+        # print(pde[self.domain_mask].size(), f_domain.size())
+        # print(np.linalg.norm(pde_residual.detach().numpy()))
+        loss_pde = torch.norm(pde_residual)**2
+        # print(loss_pde)
+        # stp
+        # loss_boundary = torch.mean(pde[self.boundary_mask])**2
         #regularization
-        loss_reg = self.reg_param * sum(param.abs().sum() for param in x.values())
+        # loss_reg = self.reg_param * sum(param.abs().sum() for param in x.values())
 
-        loss = loss_pde+loss_boundary+loss_reg
+        loss = loss_pde #+loss_boundary+loss_reg
         #print(f" losst:{loss}")
         #loss = loss_boundary
         return loss
@@ -216,22 +245,23 @@ def train_model(model,optimizer,obj):
 
         total_loss += obj.loss(x).item()
 
-        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss/data_num:.4f}")
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss/data_num:1.8f}")
 
 def plot_comparison(model, PDEObj, n_samples=1):
     # Generate data for a single sample
     # inputs_domain, inputs_boundary, inputs = PDEObj.input_data(meshsize)
-    meshsize = PDEObj.mshsize
+    meshsize      = PDEObj.mshsize
     real_solution = PDEObj.u_solution_tensor
     # real_solution = PDEObj.generate_fenics_data(n_samples=n_samples, meshsize=meshsize)[3]
     # Pass inputs_domain through the trained model to get predictions
     predicted_solution = model(PDEObj.inputs).detach().numpy()
     # Convert solutions into 2D grids
     # real_solution_grid = real_solution.squeeze(0).reshape(meshsize + 1, meshsize + 1).numpy()
-    real_solution_grid = real_solution[0].reshape(meshsize + 1, meshsize + 1).numpy()
+    print(predicted_solution.shape())
+    real_solution_grid      = real_solution[0].reshape(meshsize + 1, meshsize + 1).numpy()
     predicted_solution_grid = predicted_solution[PDEObj.domain_mask].reshape(meshsize - 1, meshsize - 1) #not correct?
     # Compute error (absolute difference)
-    error_grid = abs(real_solution_grid[1:31, 1:31] - predicted_solution_grid)
+    error_grid = abs(real_solution_grid[1:meshsize, 1:meshsize] - predicted_solution_grid)
 
     # Plot real solution, predicted solution, and error
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -292,8 +322,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     input_dim = 2
-    output_dim = 1
-    hidden_dim = 400
+    output_dim = 1 #switch dims here? input domain and output sol?
+
+    hidden_dim = 100
     epochs = 1000
     # model = FullyConnectedNN(input_dim, hidden_dim, output_dim)
     #Loss function
@@ -301,7 +332,7 @@ if __name__ == "__main__":
 
     # Initialize the model, loss, and optimizer
     model     = FullyConnectedNN(input_dim, hidden_dim, output_dim).to(device)
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     # optimizer = optim.LBFGS(model.parameters(), lr=0.01, history_size=10, max_iter=4, line_search_fn="strong_wolfe")
 
     PDEObj    = PDEObjective(n_samples=1,meshsize=31,reg_param=0.0)

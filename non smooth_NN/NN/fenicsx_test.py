@@ -223,7 +223,8 @@ def plot_comparison(model, PDEObj, n_samples=1):
     u_plotter.add_mesh(u_grid, show_edges=True)
     u_plotter.view_xy()
     if not pyvista.OFF_SCREEN:
-        u_plotter.show()
+        # u_plotter.show()
+        u_plotter.save_graphic("true_state.eps")
     # Pass inputs_domain through the trained model to get predictions
     predicted_solution = model(PDEObj.inputs).detach().numpy()
     u_grid.point_data["u"] = predicted_solution[0]
@@ -232,7 +233,8 @@ def plot_comparison(model, PDEObj, n_samples=1):
     u_plotter.add_mesh(u_grid, show_edges=True)
     u_plotter.view_xy()
     if not pyvista.OFF_SCREEN:
-        u_plotter.show()
+        # u_plotter.show()
+        u_plotter.save_graphic("nn.eps")
     # Compute error (absolute difference)
     error_grid = abs(PDEObj.u_solution_tensor - predicted_solution)
     print(np.linalg.norm(error_grid), np.linalg.norm(np.dot(PDEObj.A, predicted_solution.T) - PDEObj.f_value_list.detach().numpy()))
@@ -242,7 +244,8 @@ def plot_comparison(model, PDEObj, n_samples=1):
     u_plotter.add_mesh(u_grid, show_edges=True)
     u_plotter.view_xy()
     if not pyvista.OFF_SCREEN:
-        u_plotter.show()
+        # u_plotter.show()
+        u_plotter.save_graphic("diff.eps")
 
 
 import copy
