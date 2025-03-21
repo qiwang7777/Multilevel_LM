@@ -1,7 +1,7 @@
 #Reduced Objective Function
 import numpy as np
 import torch.nn as nn
-
+import matplotlib.pyplot as plt
 # Fully connected neural network construction
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -20,14 +20,6 @@ class FullyConnectedNN(nn.Module):
 class NNObjective:
     def __init__(self, var):
         self.var = var
-        self.cnt = {
-            'nns': 0, 'nngrad': 0
-        }
-    def profile(self):
-        print("\nProfile Objective")
-        print("  #nns    #nngrad ")
-        print(f"  {self.cnt['nns']:6d}      {self.cnt['nngrad']:6d}")
-        return self.cnt
     def update(self, x, type):
         return None
     # Compute objective function value
@@ -48,7 +40,6 @@ class NNObjective:
 
         # loss = loss_pde+loss_boundary+loss_reg
         val = loss_pde.squeeze() # reduce dims for some reason
-        self.cnt['nns'] += 1
         #loss = loss_boundary
         return val
 
@@ -63,7 +54,6 @@ class NNObjective:
           grad = self.torch_gradient(x.td, gtol)
         else:
           grad = self.torch_gradient(x, gtol)
-        self.cnt['nngrad'] += 1
         gerr = 0
         return TorchVect(grad), gerr
 
@@ -78,6 +68,8 @@ class NNObjective:
         gfunc = lambda t: self.torch_gradient(t, htol)
         _, ans = torch.func.jvp(gfunc, (x.td,), (v.td,))
         return TorchVect(ans), 0
+    
+
 
 
 # Set up BB
@@ -86,8 +78,6 @@ from mpi4py import MPI
 import torch
 import dolfinx.fem.petsc
 import dolfinx.nls.petsc
-import copy
-import time
 
 class NNSetup:
     """
@@ -98,6 +88,7 @@ class NNSetup:
         self.nsamps = n_samples
         # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
         self.domain = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, n,n)
+        
         self.V      = dolfinx.fem.functionspace(self.domain, ("Lagrange", 1))
         # Source term
         self.f      = dolfinx.fem.Constant(self.domain, dolfinx.default_scalar_type(-6))
@@ -227,6 +218,57 @@ class NNSetup:
             }
       return var
 
+
+  
+    def plot_solutions(self, pinns_solution=None):
+    
+        # Extract mesh coordinates
+        geometry = self.domain.geometry.x[:, :2]
+        X = geometry[:, 0]
+        Y = geometry[:, 1]
+        
+
+        # Real solution
+        real_solution = self.u_solution_tensor[0].numpy()  # Shape: (1024,)
+
+        # Predict the PINNs solution if not provided
+        if pinns_solution is None:
+            with torch.no_grad():
+                pinns_solution = self.NN(self.inputs).numpy()  # Shape: (1, 1024)
+            pinns_solution = pinns_solution.squeeze(0)  # Remove the extra dimension -> (1024,)
+
+        
+        # Plot the true solution
+        plt.figure(figsize=(15, 5))
+
+        plt.subplot(1, 3, 1)
+        plt.title("True Solution")
+        plt.tricontourf(geometry[:, 0], geometry[:, 1], real_solution, levels=50, cmap='viridis')
+        plt.colorbar()
+        plt.xlabel("x")
+        plt.ylabel("y")
+
+        # Plot the predicted solution
+        plt.subplot(1, 3, 2)
+        plt.title("Predicted Solution")
+        plt.tricontourf(geometry[:, 0], geometry[:, 1], pinns_solution, levels=50, cmap='viridis')
+        plt.colorbar()
+        plt.xlabel("x")
+        plt.ylabel("y")
+
+        # Plot the error (absolute difference)
+        error = np.abs(real_solution - pinns_solution)
+        plt.subplot(1, 3, 3)
+        plt.title("Error (Absolute Difference)")
+        plt.tricontourf(geometry[:, 0], geometry[:, 1], error, levels=50, cmap='viridis')
+        plt.colorbar()
+        plt.xlabel("x")
+        plt.ylabel("y")
+
+        plt.tight_layout()
+        plt.show()
+
+
 def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     params.setdefault('maxitsp', 10)
     params.setdefault('lam_min', 1e-12)
@@ -338,6 +380,9 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 
     return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
 
+# Example Problem Class
+
+
 class L2vectorPrimal:
     def __init__(self, var):
         self.var = var
@@ -376,6 +421,7 @@ class L2vectorDual:
     def dual(self, x):
         return x
 
+import copy
 class TorchVect:
     @torch.no_grad()
     def __init__(self, tensordict): #store tensor dictionary
@@ -472,6 +518,8 @@ class Problem:
         self.dvector = L2vectorDual(var)
         self.obj_smooth = NNObjective(var)
         self.obj_nonsmooth = L1Norm(var)
+
+import time
 
 def trustregion(x0, problem, params):
     """
@@ -796,7 +844,7 @@ def set_default_parameters(name):
     params['safeguard'] = np.sqrt(np.finfo(float).eps)
 
     # Stopping tolerances
-    params['maxit'] = 200
+    params['maxit'] = 2000
     params['reltol'] = True
     params['gtol'] = 1e-5
     params['stol'] = 1e-10
@@ -1216,19 +1264,25 @@ class phiPrec: # you can definitely clean this up and inherit a bunch of stuff b
         return Dv
     def getParameter(self):
         return self.problem.obj_nonsmooth.getParameter()
+    
+
+    
 
 def driver(savestats, name):
     print("driver started")
     np.random.seed(0)
 
     # Set up optimization problem
-    n          = 31  # Number of cells
+    n          = 3  # Number of cells
     nu         = 0.08  # Viscosity
-    alpha      = 1e-4  # L2 penalty parameter
-    beta       = 1e-2  # L1 penalty parameter
+    alpha      = 1  # L2 penalty parameter
+    beta       = 1e-3  # L1 penalty parameter
     derivCheck = True
 
     nnset = NNSetup(n, nu, alpha, beta, n_samples=1)
+    nnset.plot_solutions()
+    print(nnset.u_solution_tensor)
+
     var   = nnset.returnVars(False)
     problem = Problem(var)
     if derivCheck:
@@ -1256,32 +1310,55 @@ def driver(savestats, name):
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
-    pro_tr = problem.obj_smooth.profile()
+    pro_tr =  [] #problem.obj_smooth.profile()
+    
 
     cnt[1] = (cnt_tr, pro_tr)
 
 
     print("\nSummary")
     print(
-        "           niter     nobjs     ngrad     nhess     nobjn     nprox     nns     nngrad"
-    )
+        "           niter     nobjs     ngrad     nhess     nobjn     nprox     ")
+    
+    
     print(
         f"   SGP2:  {cnt[1][0]['iter']:6d}    {cnt[1][0]['nobj1']:6d}    {cnt[1][0]['ngrad']:6d}    {cnt[1][0]['nhess']:6d}    "
-        f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}    {cnt[1][1]['nns']:6d}    {cnt[1][1]['nngrad']:6d}"
+        f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}     "
     )
+    #for name, param in nnset.NN.named_parameters():
+    #    if name in x.td:
+    #        param.data.copy_(x.td[name])  # Update the parameter with the optimized value
 
-    # Plot results - plot results properly
-    # import matplotlib.pyplot as plt
+    ## Print updated weights of the first layer (fc1)
+    #state_dict_after = {name: param.clone() for name, param in nnset.NN.named_parameters()}
+    #weights_fc1_after = state_dict_after['fc1.weight']
+    #print("Weights of fc1 after optimization:", weights_fc1_after)
+    nnset.NN.load_state_dict(x.td)  # Load the updated parameters into the neural network
+    nnset.NN.eval()
+    #state_dict_after = nnset.NN.state_dict()
+    #weights_fc1_after = state_dict_after['fc1.weight']
+    #print("Weights of fc1 after optimization:", weights_fc1_after)
 
-    # plt.figure()
-    # plt.plot(mesh, x, "b", linewidth=3)
-    # plt.xlabel("x")
-    # plt.ylabel("z(x)")
-    # plt.title("Optimal Control")
-    # plt.grid()
-    # plt.show()
+    # Use the updated neural network for inference or further tasks
+    updated_nn = nnset.NN
+    print("Updated neural network is stored in `updated_nn`.")
+    nnset.plot_solutions()
 
+
+    
+    
+
+    # Use the updated neural network for inference or further tasks
+    #updated_nn = nnset.NN
+    
+    
+    
+
+    
+    
     return cnt
 
+
+cnt = driver(False, "test_run")
 
 cnt = driver(False, "test_run")
