@@ -3,9 +3,19 @@ import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
 # Fully connected neural network construction
+# Set up BB
+import ufl, dolfinx
+from mpi4py import MPI
+import torch
+import dolfinx.fem.petsc
+import dolfinx.nls.petsc
+
+import copy
+import time
+
 def restriction_R(m,n):
-    
-    matrix_R = torch.zeros((m,n))
+
+    matrix_R = torch.zeros((m,n), dtype=torch.float64)
     for i in range(m):
         matrix_R[i,2*(i+1)-1] = 1/np.sqrt(2)
         matrix_R[i,2*i] = 1/np.sqrt(2)
@@ -31,22 +41,22 @@ class FullyConnectedNN(nn.Module):
 class ReducedNN(nn.Module):
     def __init__(self, original_nn, R):
         super(ReducedNN, self).__init__()
-        self.input_dim = original_nn.input_dim
+        self.input_dim   = original_nn.input_dim
         self.hidden_half = int(original_nn.hidden_dim/2)
-        self.output_dim = original_nn.output_dim
-        self.fc1 = nn.Linear(self.input_dim, self.hidden_half)
-        self.fc2 = nn.Linear(self.hidden_half, self.hidden_half)
-        self.fc3 = nn.Linear(self.hidden_half, self.output_dim)
+        self.output_dim  = original_nn.output_dim
+        self.fc1         = nn.Linear(self.input_dim, self.hidden_half)
+        self.fc2         = nn.Linear(self.hidden_half, self.hidden_half)
+        self.fc3         = nn.Linear(self.hidden_half, self.output_dim)
 
         # Transform weights and biases
-        self.fc1.weight.data = R @ original_nn.fc1.weight.data
-        self.fc1.bias.data = (R @ original_nn.fc1.bias.data.unsqueeze(1)).squeeze()
-        
-        self.fc2.weight.data = R @ original_nn.fc2.weight.data @ R.T
-        self.fc2.bias.data = (R @ original_nn.fc2.bias.data.unsqueeze(1)).squeeze()
-        
+        self.fc1.weight.data =  R @ original_nn.fc1.weight.data
+        self.fc1.bias.data   = (R @ original_nn.fc1.bias.data.unsqueeze(1)).squeeze()
+
+        self.fc2.weight.data =  R @ original_nn.fc2.weight.data @ R.T
+        self.fc2.bias.data   = (R @ original_nn.fc2.bias.data.unsqueeze(1)).squeeze()
+
         self.fc3.weight.data = original_nn.fc3.weight.data @ R.T
-        self.fc3.bias.data = original_nn.fc3.bias.data
+        self.fc3.bias.data   = original_nn.fc3.bias.data
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -77,7 +87,6 @@ class NNObjective:
 
         # loss = loss_pde+loss_boundary+loss_reg
         val = loss_pde.squeeze() # reduce dims for some reason
-        #loss = loss_boundary
         return val
 
     def value(self, x, ftol):
@@ -101,20 +110,9 @@ class NNObjective:
         return grad
 
     def hessVec(self, v, x, htol):
-
         gfunc = lambda t: self.torch_gradient(t, htol)
         _, ans = torch.func.jvp(gfunc, (x.td,), (v.td,))
         return TorchVect(ans), 0
-    
-
-
-
-# Set up BB
-import ufl, dolfinx
-from mpi4py import MPI
-import torch
-import dolfinx.fem.petsc
-import dolfinx.nls.petsc
 
 class NNSetup:
     """
@@ -126,7 +124,7 @@ class NNSetup:
         self.nsamps = n_samples
         # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
         self.domain = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, n,n)
-        
+
         self.V      = dolfinx.fem.functionspace(self.domain, ("Lagrange", 1))
         # Source term
         self.f      = dolfinx.fem.Constant(self.domain, dolfinx.default_scalar_type(-6))
@@ -144,13 +142,13 @@ class NNSetup:
         self.beta  = beta
         self.alpha = alpha
         self.mu    = mu
-         
-        
+
+
 
         self.NN    = FullyConnectedNN((n+1)**2, NN_dim, (n+1)**2)
         Res = restriction_R(int(self.NN.hidden_dim/2),self.NN.hidden_dim)
-        self.NN_low = ReducedNN(self.NN,Res)
         self.NN.to(torch.float64)
+        self.NN_low = ReducedNN(self.NN,Res)
         self.NN_low.to(torch.float64)
         t = self.generate_fenics_data()
         self.kappa_value_list  = t[0]
@@ -281,15 +279,13 @@ class NNSetup:
             }
       return var
 
-
-  
     def plot_solutions(self, pinns_solution=None):
-    
+
         # Extract mesh coordinates
         geometry = self.domain.geometry.x[:, :2]
         X = geometry[:, 0]
         Y = geometry[:, 1]
-        
+
 
         # Real solution
         real_solution = self.u_solution_tensor[0].numpy()  # Shape: (1024,)
@@ -300,7 +296,7 @@ class NNSetup:
                 pinns_solution = self.NN(self.inputs).numpy()  # Shape: (1, 1024)
             pinns_solution = pinns_solution.squeeze(0)  # Remove the extra dimension -> (1024,)
 
-        
+
         # Plot the true solution
         plt.figure(figsize=(15, 5))
 
@@ -347,12 +343,12 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
     snorm = 0
 
     # Evaluate model at GCP
-    sHs = 0
+    sHs     = 0
     sHs_low = 0
-    Rgrad = R_res@dgrad
-    n = R_res.shape[1]
-    
-    gs = 0
+    Rgrad   = R_res@dgrad
+    n       = R_res.shape[1]
+
+    gs     = 0
     gs_low = 0
     valold = val
     phiold = phi
@@ -369,14 +365,14 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
         snorm0 = snorm
 
         # Compute step
-        x1 = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
-        s = x1 - x0
+        x1  = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
+        s   = x1 - x0
         IRR = np.identity(n) - R_res.T@R_res
-        
-        
-        
+
+
+
         s_low = R_res@(s+t0*(IRR @ dgrad))
-        
+
         x1_low = x0_low + s_low
 
         # Check optimality conditions
@@ -397,7 +393,7 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
         Hs_low = problem_low.obj_smooth.hessVec(s_low, x_low, params['gtol'])[0]
 
         sHs_low = problem_low.dvector.apply(Hs_low, s_low)
-        
+
         g0s_low = problem_low.pvector.dot(g0_low, s_low)
         phinew_low = problem.obj_nonsmooth.value(x1)
         #eps = 1e-12
@@ -423,7 +419,7 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
         else:
             x0_low = x0_low + alpha * s_low
             x0 = x0 + alpha * s
-            
+
             g0_low = alpha * problem_low.dvector.dual(Hs_low) + g0_low
             valnew_low = valold + alpha * g0s_low + 0.5 * alpha ** 2 * sHs_low
             phinew = problem.obj_nonsmooth.value(x0)
@@ -573,9 +569,6 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 
     return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
 
-# Example Problem Class
-
-
 class L2vectorPrimal:
     def __init__(self, var):
         self.var = var
@@ -614,7 +607,6 @@ class L2vectorDual:
     def dual(self, x):
         return x
 
-import copy
 class TorchVect:
     @torch.no_grad()
     def __init__(self, tensordict): #store tensor dictionary
@@ -650,6 +642,15 @@ class TorchVect:
     @torch.no_grad()
     def __rmul__(self, alpha):
         return self.__mul__(alpha)
+    @torch.no_grad()
+    def __matmul__(self, R):
+      ans = self.clone()
+      for k, v, in self.td.items():
+        print(k, v.size())
+        ans.td[k] = R@v
+    @torch.no_grad()
+    def __rmatmul__(self, R):
+      return self.__matmul__(R)
     @torch.no_grad()
     def __truediv__(self, alpha):
         ans = self.clone()
@@ -712,9 +713,7 @@ class Problem:
         self.obj_smooth = NNObjective(var)
         self.obj_nonsmooth = L1Norm(var)
 
-import time
-
-def trustregion(R_res,x0low, x0, problem_low,problem, params):
+def trustregion(R_res, x0low, x0, problem_low,problem, params):
     """
     Trust-region optimization algorithm.
 
@@ -809,14 +808,14 @@ def trustregion(R_res,x0low, x0, problem_low,problem, params):
     if params['useInexactObj']:
         ftol = params['maxValTol']
 
-    val, _ = problem.obj_smooth.value(x, ftol)
+    val, _      = problem.obj_smooth.value(x, ftol)
     val_low, _  = problem_low.obj_smooth.value(x0low,ftol)
-    
+
     cnt['nobj1'] += 1
 
-    grad, dgrad, gnorm, cnt = compute_gradient(x, problem, params, cnt)
+    grad, dgrad, gnorm, cnt              = compute_gradient(x, problem, params, cnt)
     grad_low,dgrad_low,gnorm_low,cnt_low = compute_gradient(x0low,problem_low,params,cnt)
-    phi = problem.obj_nonsmooth.value(x)
+    phi                                  = problem.obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
 
     if hasattr(problem.obj_smooth, 'end_counter'):
@@ -868,16 +867,17 @@ def trustregion(R_res,x0low, x0, problem_low,problem, params):
 
         # Solve trust-region subproblem
         params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
+
         if np.linalg.norm(R_res@grad)>=0.5*np.linalg.norm(grad) and np.linalg.norm(R_res@grad)>=0.01:
             print("Recursive step")
             s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_two_level(
-                R_res, x,val,R_res@grad,grad,phi,problem_low,problem,params,cnt)
+                R_res, x, val, R_res@grad, grad, phi, problem_low, problem,params, cnt)
         else:
             print("Taylor step")
             s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(
             x, val, grad, phi, problem, params, cnt)
 
-        
+
         # Update function information
         xnew = x + s
         xnew_low = x0low + s_low
@@ -1042,7 +1042,6 @@ def compute_gradient(x, problem, params, cnt):
 
     return grad, dgrad, gnorm, cnt
 
-#Example usage
 def set_default_parameters(name):
     params = {}
 
@@ -1122,228 +1121,6 @@ def trustregion_step_two_level(R_res,x, xlow,val,grad_low,grad,phi,problem_low,p
     cnt = problemTR.obj_smooth.addCounter(cnt)
     cnt = problemTR.obj_nonsmooth.addCounter(cnt)
     return s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params
-
-
-def deriv_check_simopt(u0, z0, obj, con, tol):
-    """
-    Perform derivative checks using finite differences.
-
-    Parameters:
-    u0 (np.array): Initial state vector.
-    z0 (np.array): Initial control vector.
-    obj (Objective): Objective function class.
-    con (Constraint): Constraint class.
-    tol (float): Tolerance for function evaluations.
-    """
-    # Random directions for finite differences
-    u = np.random.randn(*u0.shape)
-
-    udir = np.random.rand(*u0.shape)
-
-    z = np.random.randn(*z0.shape)
-
-    zdir = np.random.rand(*z0.shape)
-
-    lambda_ = np.random.randn(*(con.value(np.hstack([u, z]))[0]).shape)
-
-    # Evaluate objective and constraint functions
-    f = obj.value(np.hstack([u, z]), tol)[0]
-
-    df1 = obj.gradient_1(np.hstack([u, z]), tol)[0]
-
-
-    df2 = obj.gradient_2(np.hstack([u, z]), tol)[0]
-    c = con.value(np.hstack([u, z]), tol)[0]
-    J1d = con.apply_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    J2d = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
-    J1 = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z]), tol)[0]
-    J2 = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z]), tol)[0]
-
-    # Check objective gradient_1 using finite differences
-    print("\n Objective gradient_1 check using finite differences (FDs)")
-    print(" FD step size      grad'*v      FD approx.  absolute error")
-    delta = 1
-
-    for d in range(13):
-        f1 = obj.value(np.hstack([u + delta * udir, z]), tol)[0]
-
-        error = np.abs(np.dot(df1, udir) - ((f1 - f) / delta))
-        print(f" {delta:12.6e}  {np.dot(df1, udir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
-        delta /= 10
-
-    # Check objective gradient_2 using finite differences
-    print("\n Objective gradient_2 check using finite differences (FDs)")
-    print(" FD step size      grad'*v      FD approx.  absolute error")
-    delta = 1
-    for d in range(13):
-        f1 = obj.value(np.hstack([u, z + delta * zdir]), tol)[0]
-        error = np.abs(np.dot(df2, zdir) - (f1 - f) / delta)
-        print(f" {delta:12.6e}  {np.dot(df2, zdir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_11 using finite differences
-    print("\n Objective Hessian_11 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_11(udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u + delta * udir, z]), tol)[0]
-
-        fd_approx = (g1 - df1) / delta
-        error = np.linalg.norm(hv - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_12 using finite differences
-    print("\n Objective Hessian_12 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_12(zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (g1 - df1) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-
-
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_21 using finite differences
-    print("\n Objective Hessian_21 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_21(udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (g1 - df2) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_22 using finite differences
-    print("\n Objective Hessian_22 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_22(zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (g1 - df2) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Jacobian_1 using finite differences
-    print("\n Constraint Jacobian_1 check using finite differences (FDs)")
-    print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
-    delta = 1
-    for d in range(13):
-        c1 = con.value(np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (c1 - c) / delta
-        error = np.linalg.norm(J1d - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(J1d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Jacobian_2 using finite differences
-    print("\n Constraint Jacobian_2 check using finite differences (FDs)")
-    print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
-    delta = 1
-    for d in range(13):
-        c1 = con.value(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (c1 - c) / delta
-        error = np.linalg.norm(J2d - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(J2d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_11 using finite differences
-    print("\n Constraint Hessian_11 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_11(lambda_, udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
-
-        fd_approx = (Jn - J1) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_12 using finite differences
-    print("\n Constraint Hessian_12 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_12(lambda_, udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (Jn - J2) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_21 using finite differences
-    print("\n Constraint Hessian_21 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_21(lambda_, zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (Jn - J1) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_22 using finite differences
-    print("\n Constraint Hessian_22 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_22(lambda_, zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (Jn - J2) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check solve
-    print("\n Solve check")
-    uz = con.solve(z, tol)[0]
-    _, res = con.value(np.hstack([uz, z]), tol)
-    print(f"  Absolute Residual = {res:12.6e}")
-    print(f"  Relative Residual = {res / np.linalg.norm(uz):12.6e}")
-
-    # Check applyInverseJacobian_1
-    print("\n Check applyInverseJacobian_1")
-    uz = con.apply_inverse_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    Juz = con.apply_jacobian_1(uz, np.hstack([u, z]), tol)[0]
-    res = np.linalg.norm(Juz - udir)
-    print(f"  Absolute Error = {res:12.6e}")
-    print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
-
-    # Check applyInverseAdjointJacobian_1
-    print("\n Check applyInverseAdjointJacobian_1")
-    uz = con.apply_inverse_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    Juz = con.apply_adjoint_jacobian_1(uz, np.hstack([u, z]), tol)[0]
-    res = np.linalg.norm(Juz - udir)
-    print(f"  Absolute Error = {res:12.6e}")
-    print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
-
-    # Check applyAdjointJacobian_1
-    print("\n Check applyAdjointJacobian_1")
-    vdir = np.random.randn(*udir.shape)
-    aju = con.apply_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    ju = con.apply_jacobian_1(vdir, np.hstack([u, z]), tol)[0]
-    res = np.abs(np.dot(aju, vdir) - np.dot(ju, udir))
-    print(f"  Absolute Error = {res:12.6e}")
-
-    # Check applyAdjointJacobian_2
-    print("\n Check applyAdjointJacobian_2")
-    aju = con.apply_adjoint_jacobian_2(udir, np.hstack([u, z]), tol)[0]
-    ju = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
-    res = np.abs(np.dot(aju, zdir) - np.dot(ju, udir))
-    print(f"  Absolute Error = {res:12.6e}")
 
 def deriv_check(x, d, problem, tol):
     # Update the problem object
@@ -1441,12 +1218,12 @@ class modelTR:
         self.problem.obj_smooth.update(x, type)
     def value(self, x, ftol):
         val, _          = self.problem.obj_smooth.value(x, ftol)
-        self.nobj1 += 1
+        self.nobj1     += 1
         ferr            = 0
         return val, ferr
     def gradient(self,x,gtol):
         grad            = self.problem.obj_smooth.gradient(x, gtol)
-        self.ngrad += 1
+        self.ngrad     += 1
         gerr            = 0
         return grad, gerr
     def hessVec(self,v,x,htol):
@@ -1454,7 +1231,7 @@ class modelTR:
           hv   = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
           herr = 0
         else:
-          hv, herr        = self.problem.obj_smooth.hessVec(v,x,htol)
+          hv, herr    = self.problem.obj_smooth.hessVec(v,x,htol)
           self.nhess += 1
         return hv, herr
     def addCounter(self,cnt):
@@ -1491,9 +1268,6 @@ class phiPrec: # you can definitely clean this up and inherit a bunch of stuff b
         return Dv
     def getParameter(self):
         return self.problem.obj_nonsmooth.getParameter()
-    
-
-    
 
 def driver(savestats, name):
     print("driver started")
@@ -1509,7 +1283,7 @@ def driver(savestats, name):
     R_res = restriction_R(50,100)
 
     nnset = NNSetup(NN_dim, n, nu, alpha, beta, n_samples=1)
-    nnset.plot_solutions()
+    # nnset.plot_solutions()
     #print(nnset.u_solution_tensor)
 
     var   = nnset.returnVars(False)
@@ -1543,7 +1317,7 @@ def driver(savestats, name):
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
     pro_tr =  [] #problem.obj_smooth.profile()
-    
+
 
     cnt[1] = (cnt_tr, pro_tr)
 
@@ -1551,8 +1325,8 @@ def driver(savestats, name):
     print("\nSummary")
     print(
         "           niter     nobjs     ngrad     nhess     nobjn     nprox     ")
-    
-    
+
+
     print(
         f"   SGP2:  {cnt[1][0]['iter']:6d}    {cnt[1][0]['nobj1']:6d}    {cnt[1][0]['ngrad']:6d}    {cnt[1][0]['nhess']:6d}    "
         f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}     "
@@ -1577,17 +1351,17 @@ def driver(savestats, name):
     nnset.plot_solutions()
 
 
-    
-    
+
+
 
     # Use the updated neural network for inference or further tasks
     #updated_nn = nnset.NN
-    
-    
-    
 
-    
-    
+
+
+
+
+
     return cnt
 
 
