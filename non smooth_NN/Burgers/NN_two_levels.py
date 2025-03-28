@@ -645,22 +645,33 @@ class TorchVect:
         return self.__mul__(alpha)
     @torch.no_grad()
     def __matmul__(self, R):
-      ans = self.clone()
+        ans = self.clone()
       
-      for k, v, in self.td.items():
+      
+        for k, v, in self.td.items():
+            
+            
        
-        if k == 'fc1.weight':
-            ans.td[k] = R@v
-        elif k =='fc1.bias':
-            ans.td[k] = R@v
-        elif k =='fc2.weight':
-            ans.td[k] = R@v@R.T
-        elif k == 'fc2.bias':
-            ans.td[k] = R@v
-        elif k == 'fc3.weight':
-            ans.td[k] = v@R.T
-        else:
-            ans.td[k] = v
+            if k == 'fc1.weight':
+                
+                ans.td[k] = R@v
+            
+            elif k =='fc1.bias':
+                
+                ans.td[k] = R@v
+            
+            elif k =='fc2.weight':
+                ans.td[k] = R@v@R.T
+            
+            elif k == 'fc2.bias':
+                ans.td[k] = R@v
+            
+            elif k == 'fc3.weight':
+                ans.td[k] = v@R.T
+            
+            else:
+                ans.td[k] = v
+                
         return ans
             
         
