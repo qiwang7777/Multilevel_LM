@@ -328,7 +328,7 @@ class NNSetup:
         plt.show()
 
 def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_low, problem, params, cnt):
-    params.setdefault('maxitsp', 10)
+    params.setdefault('maxitsp', 1000)
     params.setdefault('lam_min', 1e-12)
     params.setdefault('lam_max', 1e12)
     params.setdefault('t', 1)
@@ -345,7 +345,7 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
     # Evaluate model at GCP
     sHs     = 0
     sHs_low = 0
-    Rgrad   = R_res@dgrad
+    Rgrad   = TorchVect.__matmul__(dgrad,R_res)
     n       = R_res.shape[1]
 
     gs     = 0
@@ -367,13 +367,30 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
         # Compute step
         x1  = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
         s   = x1 - x0
-        IRR = np.identity(n) - R_res.T@R_res
-
-
-
-        s_low = R_res@(s+t0*(IRR @ dgrad))
+        
+        IRR = torch.eye(n) - R_res.T@R_res
+        
+        s0_low = TorchVect.__matmul__(dgrad,IRR)
+        x_tt = TorchVect.__matmul__(s0_low,R_res)
+        
+        
+        
+        
+        s1_low = TorchVect.__mul__(s0_low,t0)
+        
+        s2_low = s + s1_low
+        
+            
+        
+        
+        s_low = TorchVect.__matmul__(s2_low,R_res)
+        
+            
+        
 
         x1_low = x0_low + s_low
+        
+       
 
         # Check optimality conditions
         gnorm_low = problem_low.pvector.norm(s_low)
@@ -459,7 +476,7 @@ def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_
     return s, s_low,snorm, snorm_low, pRed, phinew, iflag, iter_count, cnt, params
 
 def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
-    params.setdefault('maxitsp', 10)
+    params.setdefault('maxitsp', 1000)
     params.setdefault('lam_min', 1e-12)
     params.setdefault('lam_max', 1e12)
     params.setdefault('t', 1)
@@ -674,6 +691,8 @@ class TorchVect:
                 
         return ans
             
+
+            
         
     @torch.no_grad()
     def __rmatmul__(self, R):
@@ -754,12 +773,14 @@ def trustregion(R_res, x0low, x0, problem_low,problem, params):
     cnt (dict): Dictionary of counters and history.
     """
     start_time = time.time()
+    print("debug")
+    
 
     # Check and set default parameters
     params.setdefault('outFreq', 1)
     params.setdefault('initProx', False)
     params.setdefault('t', 1.0)
-    params.setdefault('maxit', 100)
+    params.setdefault('maxit', 10000)
     params.setdefault('reltol', False)
     params.setdefault('gtol', 1e-6)
     params.setdefault('stol', 1e-6)
@@ -836,12 +857,12 @@ def trustregion(R_res, x0low, x0, problem_low,problem, params):
         ftol = params['maxValTol']
 
     val, _      = problem.obj_smooth.value(x, ftol)
-    val_low, _  = problem_low.obj_smooth.value(x0low,ftol)
+    val_low, _  = problem_low.obj_smooth.value(x_low,ftol)
 
     cnt['nobj1'] += 1
 
     grad, dgrad, gnorm, cnt              = compute_gradient(x, problem, params, cnt)
-    grad_low,dgrad_low,gnorm_low,cnt_low = compute_gradient(x0low,problem_low,params,cnt)
+    grad_low,dgrad_low,gnorm_low,cnt_low = compute_gradient(x_low,problem_low,params,cnt)
     phi                                  = problem.obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
 
@@ -894,20 +915,26 @@ def trustregion(R_res, x0low, x0, problem_low,problem, params):
 
         # Solve trust-region subproblem
         params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
+        print(problem.pvector.norm(TorchVect.__matmul__(grad,R_res)))
+        print(0.5*problem.pvector.norm(grad))
 
-        if np.linalg.norm(R_res@grad)>=0.5*np.linalg.norm(grad) and np.linalg.norm(R_res@grad)>=0.01:
+
+        if problem.pvector.norm(TorchVect.__matmul__(grad,R_res))>=0.5*problem.pvector.norm(grad) and problem.pvector.norm(TorchVect.__matmul__(grad,R_res))>=0.01:
             print("Recursive step")
             s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_two_level(
-                R_res, x, val, R_res@grad, grad, phi, problem_low, problem,params, cnt)
+                R_res, x, x_low, val, TorchVect.__matmul__(grad,R_res), grad, phi, problem_low, problem,params, cnt)
         else:
             print("Taylor step")
             s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(
             x, val, grad, phi, problem, params, cnt)
+            s_low = TorchVect.zero(x0low)
+
+            
 
 
         # Update function information
         xnew = x + s
-        xnew_low = x0low + s_low
+        xnew_low = x_low + s_low
         problem.obj_smooth.update(xnew, 'trial')
         #valnew, val, cnt = compute_value(xnew, x, val, problem.obj_smooth, pRed, params, cnt)
         f_low,_,_ = compute_value(xnew_low,x_low,val_low,problem_low.obj_smooth,pRed,params,cnt)
@@ -1081,7 +1108,7 @@ def set_default_parameters(name):
     params['safeguard'] = np.sqrt(np.finfo(float).eps)
 
     # Stopping tolerances
-    params['maxit'] = 2000
+    params['maxit'] = 4000
     params['reltol'] = True
     params['gtol'] = 1e-5
     params['stol'] = 1e-10
@@ -1099,14 +1126,9 @@ def set_default_parameters(name):
     params['atol'] = 1e-5
     params['rtol'] = 1e-3
     params['spexp'] = 2
-    params['maxitsp'] = 15
+    params['maxitsp'] = 150
 
-    # GCP and subproblem solve parameter
-    params['useGCP'] = False
-    params['mu1'] = 1e-4
-    params['beta_dec'] = 0.1
-    params['beta_inc'] = 10.0
-    params['maxit_inc'] = 2
+
 
     # SPG and spectral GCP parameters
     params['lam_min'] = 1e-12
@@ -1305,7 +1327,7 @@ def driver(savestats, name):
     NN_dim     = 100 # Neural network nodes
     nu         = 0.08  # Viscosity
     alpha      = 1  # L2 penalty parameter
-    beta       = 1e-3  # L1 penalty parameter
+    beta       = 1e-4  # L1 penalty parameter
     derivCheck = True
     R_res = restriction_R(50,100)
 
@@ -1391,5 +1413,7 @@ def driver(savestats, name):
 
     return cnt
 
+
+cnt = driver(False, "test_run")
 
 cnt = driver(False, "test_run")
