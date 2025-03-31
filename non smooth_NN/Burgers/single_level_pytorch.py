@@ -2,6 +2,7 @@
 import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
+from TorchVector import TorchVect
 # Fully connected neural network construction
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -68,7 +69,7 @@ class NNObjective:
         gfunc = lambda t: self.torch_gradient(t, htol)
         _, ans = torch.func.jvp(gfunc, (x.td,), (v.td,))
         return TorchVect(ans), 0
-    
+
 
 
 
@@ -88,7 +89,7 @@ class NNSetup:
         self.nsamps = n_samples
         # Mesh grid for x, y ((meshsize+1) x (meshsize+1))
         self.domain = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, n,n)
-        
+
         self.V      = dolfinx.fem.functionspace(self.domain, ("Lagrange", 1))
         # Source term
         self.f      = dolfinx.fem.Constant(self.domain, dolfinx.default_scalar_type(-6))
@@ -219,14 +220,14 @@ class NNSetup:
       return var
 
 
-  
+
     def plot_solutions(self, pinns_solution=None):
-    
+
         # Extract mesh coordinates
         geometry = self.domain.geometry.x[:, :2]
         X = geometry[:, 0]
         Y = geometry[:, 1]
-        
+
 
         # Real solution
         real_solution = self.u_solution_tensor[0].numpy()  # Shape: (1024,)
@@ -237,7 +238,7 @@ class NNSetup:
                 pinns_solution = self.NN(self.inputs).numpy()  # Shape: (1, 1024)
             pinns_solution = pinns_solution.squeeze(0)  # Remove the extra dimension -> (1024,)
 
-        
+
         # Plot the true solution
         plt.figure(figsize=(15, 5))
 
@@ -420,52 +421,6 @@ class L2vectorDual:
     @torch.no_grad()
     def dual(self, x):
         return x
-
-import copy
-class TorchVect:
-    @torch.no_grad()
-    def __init__(self, tensordict): #store tensor dictionary
-        self.td = tensordict
-    @torch.no_grad()
-    def clone(self):
-        td  = copy.deepcopy(self.td)
-        ans = TorchVect(td)
-        ans.zero()
-        return ans
-    @torch.no_grad()
-    def zero(self):
-        for _, v in self.td.items():
-            v.zero_()
-    @torch.no_grad()
-    def __add__(self, other):
-        temp = other.clone()
-        for k, v in self.td.items():
-            temp.td[k] = other.td[k] + v
-        return temp
-    @torch.no_grad()
-    def __sub__(self, other):
-        temp = other.clone()
-        for k, v, in self.td.items():
-           temp.td[k] = other.td[k] - v
-        return -1*temp
-    @torch.no_grad()
-    def __mul__(self, alpha):
-      ans = self.clone()
-      for k, v in self.td.items():
-          ans.td[k].add_(v, alpha = alpha)
-      return ans
-    @torch.no_grad()
-    def __rmul__(self, alpha):
-        return self.__mul__(alpha)
-    @torch.no_grad()
-    def __truediv__(self, alpha):
-        ans = self.clone()
-        for k, v in self.td.items():
-            ans.td[k].add_(v, alpha = 1/alpha)
-        return ans
-    @torch.no_grad()
-    def __rtruediv__(self, alpha):
-        return self.__truediv__(alpha)
 
 class L1Norm:
     def __init__(self, var):
@@ -1264,9 +1219,9 @@ class phiPrec: # you can definitely clean this up and inherit a bunch of stuff b
         return Dv
     def getParameter(self):
         return self.problem.obj_nonsmooth.getParameter()
-    
 
-    
+
+
 
 def driver(savestats, name):
     print("driver started")
@@ -1311,7 +1266,7 @@ def driver(savestats, name):
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
     pro_tr =  [] #problem.obj_smooth.profile()
-    
+
 
     cnt[1] = (cnt_tr, pro_tr)
 
@@ -1319,8 +1274,8 @@ def driver(savestats, name):
     print("\nSummary")
     print(
         "           niter     nobjs     ngrad     nhess     nobjn     nprox     ")
-    
-    
+
+
     print(
         f"   SGP2:  {cnt[1][0]['iter']:6d}    {cnt[1][0]['nobj1']:6d}    {cnt[1][0]['ngrad']:6d}    {cnt[1][0]['nhess']:6d}    "
         f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}     "
@@ -1345,17 +1300,17 @@ def driver(savestats, name):
     nnset.plot_solutions()
 
 
-    
-    
+
+
 
     # Use the updated neural network for inference or further tasks
     #updated_nn = nnset.NN
-    
-    
-    
 
-    
-    
+
+
+
+
+
     return cnt
 
 

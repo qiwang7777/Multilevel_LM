@@ -2,377 +2,25 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse import spdiags, diags,lil_matrix
 from scipy.integrate import quad
-
-def set_default_parameters(name):
-    params = {}
-
-    # General Parameters
-    params['spsolver'] = name.replace(' ', '')
-    params['outFreq'] = 1
-    params['debug'] = False
-    params['initProx'] = False
-    params['t'] = 1
-    params['safeguard'] = np.sqrt(np.finfo(float).eps)
-
-    # Stopping tolerances
-    params['maxit'] = 200
-    params['reltol'] = True
-    params['gtol'] = 1e-5
-    params['stol'] = 1e-10
-    params['ocScale'] = params['t']
-
-    # Trust-region parameters
-    params['eta1'] = 0.05
-    params['eta2'] = 0.9
-    params['gamma1'] = 0.25
-    params['gamma2'] = 2.5
-    params['delta'] = 50.0
-    params['deltamax'] = 1e10
-
-    # Subproblem solve tolerances
-    params['atol'] = 1e-5
-    params['rtol'] = 1e-3
-    params['spexp'] = 2
-    params['maxitsp'] = 15
-
-    # GCP and subproblem solve parameter
-    params['useGCP'] = False
-    params['mu1'] = 1e-4
-    params['beta_dec'] = 0.1
-    params['beta_inc'] = 10.0
-    params['maxit_inc'] = 2
-
-    # SPG and spectral GCP parameters
-    params['lam_min'] = 1e-12
-    params['lam_max'] = 1e12
-
-    # Inexactness parameters
-    params['useInexactObj'] = False
-    params['useInexactGrad'] = False
-    params['gradTol'] = np.sqrt(np.finfo(float).eps)
-
-
-
-    return params
-#Derivative check
-
-class Euclidean:
-    def dot(self, x, y):
-        return np.dot(x.flatten(), y.flatten())
-
-    def apply(self, x, y):
-        return self.dot(x, y)
-
-    def norm(self, x):
-        return np.sqrt(self.dot(x, x))
-
-    def dual(self, x):
-        return x
-    
-def deriv_check_simopt(u0, z0, obj, con, tol):
-    """
-    Perform derivative checks using finite differences.
-
-    Parameters:
-    u0 (np.array): Initial state vector.
-    z0 (np.array): Initial control vector.
-    obj (Objective): Objective function class.
-    con (Constraint): Constraint class.
-    tol (float): Tolerance for function evaluations.
-    """
-    # Random directions for finite differences
-    u = np.random.randn(*u0.shape)
-
-    udir = np.random.rand(*u0.shape)
-
-    z = np.random.randn(*z0.shape)
-
-    zdir = np.random.rand(*z0.shape)
-
-    lambda_ = np.random.randn(*(con.value(np.hstack([u, z]))[0]).shape)
-
-    # Evaluate objective and constraint functions
-    f = obj.value(np.hstack([u, z]), tol)[0]
-
-    df1 = obj.gradient_1(np.hstack([u, z]), tol)[0]
-
-
-    df2 = obj.gradient_2(np.hstack([u, z]), tol)[0]
-    c = con.value(np.hstack([u, z]), tol)[0]
-    J1d = con.apply_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    J2d = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
-    J1 = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z]), tol)[0]
-    J2 = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z]), tol)[0]
-
-    # Check objective gradient_1 using finite differences
-    print("\n Objective gradient_1 check using finite differences (FDs)")
-    print(" FD step size      grad'*v      FD approx.  absolute error")
-    delta = 1
-
-    for d in range(13):
-        f1 = obj.value(np.hstack([u + delta * udir, z]), tol)[0]
-
-        error = np.abs(np.dot(df1, udir) - ((f1 - f) / delta))
-        print(f" {delta:12.6e}  {np.dot(df1, udir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
-        delta /= 10
-
-    # Check objective gradient_2 using finite differences
-    print("\n Objective gradient_2 check using finite differences (FDs)")
-    print(" FD step size      grad'*v      FD approx.  absolute error")
-    delta = 1
-    for d in range(13):
-        f1 = obj.value(np.hstack([u, z + delta * zdir]), tol)[0]
-        error = np.abs(np.dot(df2, zdir) - (f1 - f) / delta)
-        print(f" {delta:12.6e}  {np.dot(df2, zdir):12.6e}  {(f1 - f) / delta:12.6e}  {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_11 using finite differences
-    print("\n Objective Hessian_11 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_11(udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u + delta * udir, z]), tol)[0]
-
-        fd_approx = (g1 - df1) / delta
-        error = np.linalg.norm(hv - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_12 using finite differences
-    print("\n Objective Hessian_12 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_12(zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_1(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (g1 - df1) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-
-
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_21 using finite differences
-    print("\n Objective Hessian_21 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_21(udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (g1 - df2) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check objective Hessian_22 using finite differences
-    print("\n Objective Hessian_22 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    hv = obj.hessVec_22(zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        g1 = obj.gradient_2(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (g1 - df2) / delta
-        fd_approx_for_norm = fd_approx.reshape(-1,1)
-        error = np.linalg.norm(hv - fd_approx_for_norm)
-        print(f" {delta:12.6e}     {np.linalg.norm(hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Jacobian_1 using finite differences
-    print("\n Constraint Jacobian_1 check using finite differences (FDs)")
-    print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
-    delta = 1
-    for d in range(13):
-        c1 = con.value(np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (c1 - c) / delta
-        error = np.linalg.norm(J1d - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(J1d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Jacobian_2 using finite differences
-    print("\n Constraint Jacobian_2 check using finite differences (FDs)")
-    print(" FD step size      norm(Jac*v)     norm(FD approx.)   absolute error")
-    delta = 1
-    for d in range(13):
-        c1 = con.value(np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (c1 - c) / delta
-        error = np.linalg.norm(J2d - fd_approx)
-        print(f" {delta:12.6e}     {np.linalg.norm(J2d):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_11 using finite differences
-    print("\n Constraint Hessian_11 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_11(lambda_, udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
-
-        fd_approx = (Jn - J1) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_12 using finite differences
-    print("\n Constraint Hessian_12 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_12(lambda_, udir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u + delta * udir, z]), tol)[0]
-        fd_approx = (Jn - J2) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_21 using finite differences
-    print("\n Constraint Hessian_21 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_21(lambda_, zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_1(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (Jn - J1) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check constraint Hessian_22 using finite differences
-    print("\n Constraint Hessian_22 check using finite differences (FDs)")
-    print(" FD step size      norm(H*v)      norm(FD approx.)    absolute error")
-    Hv = con.apply_adjoint_hessian_22(lambda_, zdir, np.hstack([u, z]), tol)[0]
-    delta = 1
-    for d in range(13):
-        Jn = con.apply_adjoint_jacobian_2(lambda_, np.hstack([u, z + delta * zdir]), tol)[0]
-        fd_approx = (Jn - J2) / delta
-        error = np.linalg.norm(Hv - fd_approx) / (1 + np.linalg.norm(Hv))
-        print(f" {delta:12.6e}     {np.linalg.norm(Hv):12.6e}      {np.linalg.norm(fd_approx):12.6e}      {error:12.6e}")
-        delta /= 10
-
-    # Check solve
-    print("\n Solve check")
-    uz = con.solve(z, tol)[0]
-    _, res = con.value(np.hstack([uz, z]), tol)
-    print(f"  Absolute Residual = {res:12.6e}")
-    print(f"  Relative Residual = {res / np.linalg.norm(uz):12.6e}")
-
-    # Check applyInverseJacobian_1
-    print("\n Check applyInverseJacobian_1")
-    uz = con.apply_inverse_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    Juz = con.apply_jacobian_1(uz, np.hstack([u, z]), tol)[0]
-    res = np.linalg.norm(Juz - udir)
-    print(f"  Absolute Error = {res:12.6e}")
-    print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
-
-    # Check applyInverseAdjointJacobian_1
-    print("\n Check applyInverseAdjointJacobian_1")
-    uz = con.apply_inverse_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    Juz = con.apply_adjoint_jacobian_1(uz, np.hstack([u, z]), tol)[0]
-    res = np.linalg.norm(Juz - udir)
-    print(f"  Absolute Error = {res:12.6e}")
-    print(f"  Relative Error = {res / np.linalg.norm(udir):12.6e}")
-
-    # Check applyAdjointJacobian_1
-    print("\n Check applyAdjointJacobian_1")
-    vdir = np.random.randn(*udir.shape)
-    aju = con.apply_adjoint_jacobian_1(udir, np.hstack([u, z]), tol)[0]
-    ju = con.apply_jacobian_1(vdir, np.hstack([u, z]), tol)[0]
-    res = np.abs(np.dot(aju, vdir) - np.dot(ju, udir))
-    print(f"  Absolute Error = {res:12.6e}")
-
-    # Check applyAdjointJacobian_2
-    print("\n Check applyAdjointJacobian_2")
-    aju = con.apply_adjoint_jacobian_2(udir, np.hstack([u, z]), tol)[0]
-    ju = con.apply_jacobian_2(zdir, np.hstack([u, z]), tol)[0]
-    res = np.abs(np.dot(aju, zdir) - np.dot(ju, udir))
-    print(f"  Absolute Error = {res:12.6e}")
-
-
-
-def deriv_check(x, d, problem, tol):
-    # Update the problem object
-    problem.obj_smooth.update(x, 'temp')
-    val, _ = problem.obj_smooth.value(x, tol)
-    grad, _ = problem.obj_smooth.gradient(x, tol)
-    gd = problem.dvector.apply(grad, d)
-    t = 1
-
-    print('\n  Finite Difference Gradient Check')
-    print('           t       DirDeriv        FinDiff         Error')
-
-    for i in range(13):
-        xnew = x + t * d
-
-
-        problem.obj_smooth.update(xnew, 'temp')
-        valnew, _ = problem.obj_smooth.value(xnew, tol)
-        fd = (valnew - val) / t
-
-        print(f'  {t:6.4e}    {gd: 6.4e}    {fd: 6.4e}    {abs(fd - gd):6.4e}')
-        t *= 0.1
-
-    problem.obj_smooth.update(x, 'temp')
-    hv, _ = problem.obj_smooth.hessVec(d, x, tol)
-    hvnorm = problem.dvector.norm(hv)
-    t = 1
-
-    print('\n  Finite Difference Hessian Check')
-    print('           t        HessVec        FinDiff         Error')
-
-    for i in range(13):
-        xnew = x + t * d
-        problem.obj_smooth.update(xnew, 'temp')
-        gradnew, _ = problem.obj_smooth.gradient(xnew, tol)
-        fd = (gradnew - grad) / t
-        fdnorm = problem.dvector.norm(fd)
-
-        print(f'  {t:6.4e}    {hvnorm: 6.4e}    {fdnorm: 6.4e}    {problem.dvector.norm(fd - hv):6.4e}')
-        t *= 0.1
-
-    problem.obj_smooth.update(x, 'temp')
-    d2 = np.random.randn(*d.shape)  # Random d2 of the same shape as d
-    hd2, _ = problem.obj_smooth.hessVec(d2, x, tol)
-    vhd2 = problem.dvector.apply(hd2, d)
-    d2hv = problem.dvector.apply(hv, d2)
-
-    print('\n  Hessian Symmetry Check')
-    print(f'    <x,Hy> = {vhd2: 6.4e}')
-    print(f'    <y,Hx> = {d2hv: 6.4e}')
-    print(f'    AbsErr = {abs(vhd2 - d2hv): 6.4e}')
-
-
-#Vector check
-def vector_check(primal, dual, problem):
-    print('\n  Vector Check')
-    print('  Check Dual Consistency')
-
-    xp = problem.dvector.dual(dual)
-    xpp = problem.pvector.dual(xp)
-    err = problem.dvector.norm(dual - xpp)
-    print(f'  norm(x-dual(dual(x))) = {err:.4e}')
-
-    xp = problem.pvector.dual(primal)
-    xpp = problem.dvector.dual(xp)
-    err = problem.pvector.norm(primal - xpp)
-    print(f'  norm(y-dual(dual(y))) = {err:.4e}')
-
-    print('\n  Check Apply Consistency')
-    xp = problem.pvector.dual(primal)
-    xydot = problem.dvector.dot(xp, dual)
-    xyapply = problem.dvector.apply(dual, primal)
-    err = abs(xydot - xyapply)
-    print(f' |x.dot(dual(y))-x.apply(y)| = {err:.4e}')
-
-    xp = problem.dvector.dual(dual)
-    xydot = problem.pvector.dot(xp, primal)
-    xyapply = problem.pvector.apply(primal, dual)
-    err = abs(xydot - xyapply)
-    print(f' |y.dot(dual(x))-y.apply(x)| = {err:.4e}')
-
-#Set up Burgers
+import time
+from checks import deriv_check, deriv_check_simopt, vector_check
+from setDefaultParameters import set_default_parameters
+
+#Problem Class
+class Problem:
+    def __init__(self, var, R):
+        self.var  = var
+        if var['useEuclidean']:
+            self.pvector   = Euclidean(var)
+            self.dvector   = Euclidean(var)
+        else:
+            self.pvector   = L2vectorPrimal(var)
+            self.dvector   = L2vectorDual(var)
+        self.obj_smooth    = ReducedObjective(Objective(var), ConstraintSolver(var))
+        self.obj_nonsmooth = L1Norm(var)
+        self.R             = R
+
+#Burger's variables
 class BurgersSetup:
     """
 
@@ -455,6 +103,24 @@ class BurgersSetup:
         self.nu = n if usepc else n + 1
         self.nz = n if usepc else n + 1
 
+    def returnVars(self, useEuclidean):
+      var = {'beta':self.beta,
+             'n':self.n,
+             'nu':self.n-1,
+             'nz':self.n,
+             'alpha':self.alpha,
+             'A':self.A,
+             'M':self.M,
+             'R':self.R,
+             'Rlump':self.Rlump,
+             'B':self.B,
+             'b':self.b,
+             'ud':self.ud,
+             'useEuclidean':useEuclidean,
+             'mesh':self.mesh
+            }
+      return var
+
     def integrate_rhs(self, x, f):
         nx = len(x)
         b = np.zeros(nx - 2)
@@ -470,7 +136,6 @@ class BurgersSetup:
             b[i] = quad(F1, x0, x1)[0] + quad(F2, x1, x2)[0]
 
         return b
-
 
 #Objective function
 class ReducedObjective:
@@ -620,7 +285,6 @@ class ReducedObjective:
         cnt = self.cnt.copy()
         cnt['con'] = self.con0.profile()
         return cnt
-    
 class Objective:
     def __init__(self, var):
         self.var = var
@@ -702,11 +366,7 @@ class Objective:
         herr = 0
 
         return hv, herr
-
 # Constraint
-
-
-
 class ConstraintSolver:
     def __init__(self, var):
 
@@ -849,7 +509,19 @@ class ConstraintSolver:
 
     def profile(self):
         return []
-    
+
+class Euclidean:
+    def dot(self, x, y):
+        return np.dot(x.flatten(), y.flatten())
+
+    def apply(self, x, y):
+        return self.dot(x, y)
+
+    def norm(self, x):
+        return np.sqrt(self.dot(x, x))
+
+    def dual(self, x):
+        return x
 class L2vectorPrimal:
     def __init__(self, var):
         self.var = var
@@ -865,7 +537,6 @@ class L2vectorPrimal:
 
     def dual(self, x):
         return self.var['Rlump'] * x
-
 class L2vectorDual:
     def __init__(self, var):
         self.var = var
@@ -881,7 +552,6 @@ class L2vectorDual:
 
     def dual(self, x):
         return x / self.var['Rlump']
-    
 
 class L1Norm:
     def __init__(self, var):
@@ -922,56 +592,30 @@ class L1Norm:
 
     def get_parameter(self):
         return self.var['beta']
-    
 
-n = 512
-Burgers = BurgersSetup(n, mu=0.08, alpha=1e-4, beta=1e-2) 
-n = Burgers.n
-nu = Burgers.n - 1
-nz = Burgers.n
-alpha = Burgers.alpha
-beta = Burgers.beta
-M = Burgers.M
+#Recursive step
+def restriction_R(m,n):
+    """
+    Construct a sparse orthonormal matrix R in R^{m\times n}
 
-R = Burgers.R
-A = Burgers.A
-Rlump = Burgers.Rlump
-B = Burgers.B
-b = Burgers.b
-ud = Burgers.ud
-mesh = Burgers.mesh
-var = {
-       'beta':beta,
-       'n':n,
-       'nu':nu,
-       'nz':nz,
-       'alpha':alpha,
-       'A':A,
-       'M':M,
-       'R':R,
-       'Rlump':Rlump,
-       'B':B,
-       'b':b,
-       'ud':ud,
-       'useEuclidean': False,
-       'mesh':mesh
-       }
-obj = Objective(var)
-con = ConstraintSolver(var)
-red_obj = ReducedObjective(obj,con)
-class Problem:
-    def __init__(self):
-        self.pvector = L2vectorPrimal(var)
-        self.dvector = L2vectorDual(var)
-        #self.obj_smooth = ReducedObjective(obj, con)
-        self.obj_smooth = red_obj
-        self.obj_nonsmooth = L1Norm(var)
-        
+    Parameters
+    ----------
+    m : int
+        Number of rows.
+    n : int
+        Number of columns (n>>m).
 
-import time
+    Returns
+    -------
+    matrix_R : TYPE
+        DESCRIPTION.
 
-
-#Taylor model
+    """
+    matrix_R = np.zeros((m,n))
+    for i in range(m):
+        matrix_R[i,2*(i+1)-1] = 1/np.sqrt(2)
+        matrix_R[i,2*i] = 1/np.sqrt(2)
+    return matrix_R
 
 #Subsolver for Taylor model
 def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
@@ -1082,80 +726,125 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     pRed = (val + phi) - (valnew + phinew)
 
     iter_count = max(iter_count, iter0)
-
     return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
 
+def trustregion_step(l,x,val,grad,phi,problems,params,cnt):
+    #fine level l comes in
+    dgrad                   = problems[l].dvector.dual(grad) #dual(grad) puts in primal space
+    L                       = len(problems)
+    if l < L-1:
+      R                       = problems[l].R
+      Rdgrad                  = R @ dgrad
+      Rgnorm                  = problems[l+1].pvector.norm(Rdgrad)
+    else:
+      Rgnorm = 0.0
+    gnorm                   = problems[l].pvector.norm(dgrad)
 
-
-
-
-
-
-def trustregion_step(x,val,grad,phi,problem,params,cnt):
-    #can modify this to either run step or create different model?
-    problemTR               = Problem()
-    problemTR.obj_smooth    = modelTR(problem,params["useSecant"])
-    problemTR.obj_nonsmooth = phiPrec(problem)
-    dgrad                   = problemTR.dvector.dual(grad)
-
-    s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(
-        x, val, dgrad, phi, problemTR, params, cnt)
-    cnt = problemTR.obj_smooth.addCounter(cnt)
-    cnt = problemTR.obj_nonsmooth.addCounter(cnt)
+    if Rgnorm > 0.5*gnorm and Rgnorm >= 1e-3: #note: counters are off
+      problemsL = [] #problem list goes from fine to coarse
+      for i in range(0, L):
+        if i == l+1:
+          p               = Problem(problems[i].obj_nonsmooth.var, problems[i].R) #make next level problem quadratic
+          p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = i, R = problems[i-1].R, grad = grad, x = x)
+          p.obj_nonsmooth = phiPrec(problems[l], R = problems[i-1].R)
+          # d = np.random.randn(R.shape[0],)
+          # deriv_check(R @ x, d, p, 1e-4 * np.sqrt(np.finfo(float).eps))
+          # stp
+          problemsL.append(p)
+        else:
+          problemsL.append(problems[i])
+      Deltai           = params['delta']
+      xnew, cnt_coarse = trustregion(l+1, R @ x, Deltai, problemsL, params)
+      #recompute snorm, pRed, phinew
+      params['delta'] = Deltai
+      s               = R.T @ xnew - x
+      snorm           = problems[l].pvector.norm(s)
+      #check L = f_{i-1} + <R g, s> + phi_{i-1}(x0 + s)
+      #m = L + phi_i - phi_{i-1} so M = f_{i-1} + <Rg, s> + \phi_i
+      phinew = problems[l].obj_nonsmooth.value(x + s)
+      cnt['nobj2'] += 1
+      valnew, _ = problemsL[l+1].obj_smooth.value(xnew, 0.0)
+      pRed   = val + phi - valnew - phinew
+      iflag  = cnt_coarse['iflag']
+      iter   = cnt_coarse['iter']
+      cnt    = problemsL[l+1].obj_smooth.addCounter(cnt)
+      cnt    = problemsL[l+1].obj_nonsmooth.addCounter(cnt)
+    else:
+      R                       = np.eye(x.shape[0])
+      problemTR               = Problem(problems[l].var, R)
+      problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, grad = grad, x = x)
+      problemTR.obj_nonsmooth = phiPrec(problems[l], R = R)
+      # d = np.random.randn((x.shape[0]))
+      # deriv_check(x, d, problemTR, 1e-4 * np.sqrt(np.finfo(float).eps))
+      s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(x, val, dgrad, phi, problemTR, params, cnt)
+      cnt = problemTR.obj_smooth.addCounter(cnt)
+      cnt = problemTR.obj_nonsmooth.addCounter(cnt)
     return s, snorm, pRed, phinew, iflag, iter, cnt, params
 
-
-
 class modelTR:
-    def __init__(self, problem, secant):
-        self.problem = problem
-        self.secant  = secant #just dummy for now unless we want to test bfgs Hessians
-
-        self.nobj1 = 0
-        self.ngrad = 0
-        self.nhess = 0
+    def __init__(self, problems, secant, subtype = 'spg', l = 0, R = np.empty(1), grad = np.empty(1), x = np.empty(1)):
+        self.problem = problems[l]
+        self.var     = problems[l].var
+        self.secant  = secant
+        self.l       = l
+        self.x       = R @ x
+        self.R       = R
+        self.Rgrad   = problems[l].pvector.dual(R @ grad) #should be in dual space, dgrad in primal
+        self.subtype = subtype
+        self.nobj1   = 0
+        self.ngrad   = 0
+        self.nhess   = 0
+        if subtype == 'recursive':
+            grad, _      = problems[l].obj_smooth.gradient(R @ x, 0.)
+            self.grad    = grad
+            self.ngrad  += 1
 
     def update(self, x, type):
         self.problem.obj_smooth.update(x, type)
     def value(self, x, ftol):
-        val, _          = self.problem.obj_smooth.value(x, ftol)
-        self.nobj1 += 1
-        ferr            = 0
+        val, ferr    = self.problem.obj_smooth.value(x, ftol)
+        if self.subtype == 'recursive':
+          # val      += self.problem.dvector.apply(self.Rgrad - 0.*self.grad, x - self.x)
+          val      += self.problem.dvector.apply(self.Rgrad, x - self.x)
+          ferr      = 0
+        self.nobj1 += 0
         return val, ferr
     def gradient(self,x,gtol):
-        grad            = self.problem.obj_smooth.gradient(x, gtol)
-        self.ngrad += 1
-        gerr            = 0
-        return grad, gerr
+      grad, gerr      = self.problem.obj_smooth.gradient(x, gtol)
+      if self.subtype == 'recursive':
+        # grad        += self.Rgrad - 0.*self.grad
+        grad        += self.Rgrad
+        self.ngrad += 0
+      return grad, gerr
     def hessVec(self,v,x,htol):
-        if (self.secant):
-          hv   = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
-          herr = 0
-        else:
-          hv, herr        = self.problem.obj_smooth.hessVec(v,x,htol)
-          self.nhess += 1
-        return hv, herr
+      if (self.secant):
+        hv          = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
+        herr        = 0
+      else:
+        hv, herr    = self.problem.obj_smooth.hessVec(v, x, htol)
+        self.nhess += 1
+      return hv, herr
     def addCounter(self,cnt):
         #actually zero because you should eval in subprob?
-        cnt["nobj1"] += 0
-        cnt["ngrad"] += 0
-        cnt["nhess"] += 0
+        cnt["nobj1"] += self.nobj1
+        cnt["ngrad"] += self.ngrad
+        cnt["nhess"] += self.nhess
         return cnt
-
 
 class phiPrec: # you can definitely clean this up and inherit a bunch of stuff but
                # we can be explicit for now
-    def __init__(self, problem):
+    def __init__(self, problem, R = np.empty(1)):
         self.problem   = problem
         self.var       = problem.obj_nonsmooth.var
+        self.R         = R
         self.nobj2     = 0
         self.nprox     = 0
     def value(self, x):
-        val             = self.problem.obj_nonsmooth.value(x)
+        val             = self.problem.obj_nonsmooth.value(self.R.T @ x)
         self.nobj2     += 1
         return val
     def prox(self, x, t):
-        px          = self.problem.obj_nonsmooth.prox(x, t)
+        px          = x + self.R @ (self.problem.obj_nonsmooth.prox(self.R.T @ x, t) - self.R.T @ x)
         self.nprox += 1
         return px
     def addCounter(self, cnt):
@@ -1170,201 +859,8 @@ class phiPrec: # you can definitely clean this up and inherit a bunch of stuff b
         return Dv
     def getParameter(self):
         return self.problem.obj_nonsmooth.getParameter()
-    
-#Recursive step
-def restriction_R(m,n):
-    """
-    Construct a sparse orthonormal matrix R in R^{m\times n} 
 
-    Parameters
-    ----------
-    m : int
-        Number of rows.
-    n : int
-        Number of columns (n>>m).
-
-    Returns
-    -------
-    matrix_R : TYPE
-        DESCRIPTION.
-
-    """
-    matrix_R = np.zeros((m,n))
-    for i in range(m):
-        matrix_R[i,2*(i+1)-1] = 1/np.sqrt(2)
-        matrix_R[i,2*i] = 1/np.sqrt(2)
-    return matrix_R
-
-#Lower level model objective function
-#Nonsmooth part of objective function phil(zl)=phih(zh) where zl=R@zh.
-#Thus, we define phil(zl)=||R.T@zl||_1.
-class L1Norm_low:
-    def __init__(self, var):
-        self.var = var
-
-    def value(self, R_res, x):
-        return self.var['beta'] * np.dot(self.var['Rlump'].T, np.abs(R_res.T@x))
-
-    def prox(self, R_res, x, t):
-        if self.var['useEuclidean']:
-            return R_res @ (np.maximum(0, np.dot(R_res.T,x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(np.dot(R_res.T,x)))
-        else:
-            return R_res @ (np.maximum(0, np.dot(R_res.T,x) - t * self.var['beta']) * np.sign(np.dot(R_res.T,x)))
-
-    def dir_deriv(self, s, x):
-        sx = np.sign(x)
-        return self.var['beta'] * (np.dot(sx.T, s) + np.dot((1 - np.abs(sx)).T, np.abs(s)))
-
-    def project_sub_diff(self, g, x):
-        sx = np.sign(x)
-        return self.var['beta'] * sx + (1 - np.abs(sx)) * np.clip(g, -self.var['beta'], self.var['beta'])
-
-    def gen_jac_prox(self, x, t):
-        d = np.ones_like(x)
-        px = self.prox(x, t)
-        ind = px == 0
-        d[ind] = 0
-        return np.diag(d), ind
-
-    def apply_prox_jacobian(self, R_res,v, x, t):
-        if self.var['useEuclidean']:
-            ind = np.dot(R_res.T,x) <= t * self.var['Rlump'] * self.var['beta']
-        else:
-            ind = np.dot(R_res.T,x) <= t * self.var['beta']
-        Dv = v.copy()
-        Dv[ind] = 0
-        return Dv
-
-    def get_parameter(self):
-        return self.var['beta']
-
-def trustregion_step_SPG2_low(R_res,x_low,x, val, dgrad_low,dgrad, phi, problem_low, problem, params, cnt):
-    params.setdefault('maxitsp', 10)
-    params.setdefault('lam_min', 1e-12)
-    params.setdefault('lam_max', 1e12)
-    params.setdefault('t', 1)
-    params.setdefault('gtol', np.sqrt(np.finfo(float).eps))
-
-    safeguard = 1e2 * np.finfo(float).eps
-    x0_low = x_low
-
-    x0 = x
-    g0_low = dgrad_low
-    g0 = dgrad
-    snorm_low = 0
-
-    # Evaluate model at GCP
-    sHs = 0
-    sHs_low = 0
-    Rgrad = R_res@dgrad
-    
-    gs = 0
-    gs_low = 0
-    valold = val
-    phiold = phi
-    valnew = valold
-    phinew = phiold
-
-    t0 = max(params['lam_min'], min(params['lam_max'], params['t'] / problem_low.pvector.norm(Rgrad)))
-
-    # Set exit flag
-    iter_count = 0
-    iflag = 1
-
-    for iter0 in range(1, params['maxitsp'] + 1):
-        snorm0 = snorm_low
-
-        # Compute step
-        x1 = problem_low.obj_nonsmooth.prox(x0_low - t0 * g0_low, t0)
-        s_low = x1 - x0_low
-        
-        
-        x1_low = x0_low + s_low
-
-        # Check optimality conditions
-        gnorm_low = problem_low.pvector.norm(s_low)
-        if gnorm_low / t0 <= params.get('tolsp', 0) and iter_count > 1:
-            iflag = 0
-            break
-
-        # Compute relaxation parameter
-        alphamax = 1
-        snorm_low = problem_low.pvector.norm(s_low)
-        if snorm_low >= params['delta'] - safeguard:
-            ds = problem_low.pvector.dot(s_low, x0_low - x_low)
-            dd = gnorm_low ** 2
-            alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
-
-        #Hs = red_obj.hessVec(v, z, htol)[0]
-        Hs_low = problem_low.obj_smooth.hessVec(s_low, x_low, params['gtol'])[0]
-
-        sHs_low = problem_low.dvector.apply(Hs_low, s_low)
-        
-        g0s_low = problem_low.pvector.dot(g0_low, s_low)
-        phinew_low = problem_low.obj_nonsmooth.value(x1)
-        #eps = 1e-12
-        alpha0 = max(-(g0s_low + phinew_low - phiold), gnorm_low ** 2 / t0) / sHs_low
-
-        if sHs_low <= safeguard:
-            alpha = alphamax
-            if 0.5 * alphamax < alpha0 and iter0 > 1:
-                alpha = 0
-                phinew_low = phiold
-                valnew = valold
-                snorm = snorm0
-                iflag = 3
-                break
-        else:
-            alpha = min(alphamax, alpha0)
-
-        # Update iterate
-        if alpha == 1:
-            x0_low = x1_low
-            g0_low = problem_low.dvector.dual(Hs_low) + g0_low
-            valnew_low = valold + g0s_low + 0.5 * sHs_low
-        else:
-            x0_low = x0_low + alpha * s_low
-            x0 = x0 + alpha * R_res.T @ s_low
-            
-            g0_low = alpha * problem_low.dvector.dual(Hs_low) + g0_low
-            valnew_low = valold + alpha * g0s_low + 0.5 * alpha ** 2 * sHs_low
-            phinew = problem.obj_nonsmooth.value(x0)
-            snorm_low = problem_low.pvector.norm(x0_low - x_low)
-
-        # Update model information
-        valold = valnew_low
-        phiold = phinew
-
-        # Check step size
-        if snorm_low >= params['delta'] - safeguard:
-            iflag = 2
-            break
-
-        norm_g0_low = problem_low.pvector.norm(g0_low)
-
-        # Update spectral step length
-        if sHs_low <= safeguard:
-            #if norm_g0 == 0:
-                #norm_g0 = eps
-
-            lambdaTmp = params['t'] / norm_g0_low
-
-        else:
-            lambdaTmp = gnorm_low ** 2 / sHs_low
-
-        t0 = max(params['lam_min'], min(params['lam_max'], lambdaTmp))
-
-    s_low = x0_low - x_low
-    s = R_res.T @ s_low
-    snorm = problem.pvector.norm(s)
-    pRed = (val+phi)-(valnew + phinew)
-    #pRed = (val + phi) - (valnew_low + phinew)-np.dot(Rgrad - dgrad_low,s_low)
-
-    iter_count = max(iter_count, iter0)
-
-    return s, s_low,snorm, snorm_low, pRed, phinew, iflag, iter_count, cnt, params
-
-def trustregion(R_res,x0, problem_low,problem, params):
+def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     """
     Trust-region optimization algorithm.
 
@@ -1443,48 +939,40 @@ def trustregion(R_res,x0, problem_low,problem, params):
     }
 
     # Compute initial function information
-    if hasattr(problem.obj_smooth, 'begin_counter'):
-        cnt = problem.obj_smooth.begin_counter(0, cnt)
+    if hasattr(problems[l].obj_smooth, 'begin_counter'):
+        cnt = problems[l].obj_smooth.begin_counter(0, cnt)
 
     if params['initProx']:
-        x = problem.obj_nonsmooth.prox(x0, 1)
-        x_low = R_res@ x
+        x = problems[l].obj_nonsmooth.prox(x0, 1)
         cnt['nprox'] += 1
     else:
         x = x0
-        x_low = R_res@x
 
-    problem.obj_smooth.update(x, 'init')
+    problems[l].obj_smooth.update(x, 'init')
     ftol = 1e-12
     if params['useInexactObj']:
         ftol = params['maxValTol']
+    params['delta'] = min(params['delta'], Deltai)
+    val, _      = problems[l].obj_smooth.value(x, ftol)
 
-    val, _ = problem.obj_smooth.value(x, ftol)
-    val_low, _  = problem_low.obj_smooth.value(R_res@x,ftol)
-    
     cnt['nobj1'] += 1
 
-    grad, dgrad, gnorm, cnt = compute_gradient(x, problem, params, cnt)
-    grad_low,dgrad_low,gnorm_low,cnt_low = compute_gradient(R_res@x,problem_low,params,cnt)
-    phi = problem.obj_nonsmooth.value(x)
+    grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
+    phi = problems[l].obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
 
-    if hasattr(problem.obj_smooth, 'end_counter'):
-        cnt = problem.obj_smooth.end_counter(0, cnt)
-
-    # Initialize secant if needed
-    #if params['useSecant'] or params['useSecantPrecond']:
-    #    problem.secant = SR1(params['secantSize'], params['useDefault'], params['initScale'])
-
+    if hasattr(problems[l].obj_smooth, 'end_counter'):
+        cnt = problems[l].obj_smooth.end_counter(0, cnt)
 
     if params['useSecantPrecond']:
-        problem.prec.apply = lambda x: problem.secant.apply(x, problem.pvector, problem.dvector)
-        problem.prec.apply_inverse = lambda x: problem.secant.apply_inverse(x, problem.pvector, problem.dvector)
+        problems[l].prec.apply         = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
+        problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
 
     # Output header
-    print(f"\nNonsmooth Trust-Region Method using {params.get('spsolver', 'SPG2')} Subproblem Solver")
-    print("  iter            value            gnorm              del            snorm       nobjs      ngrad      nhess      nobjn      nprox    iterSP    flagSP")
-    print(f"  {0:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}              ---      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}       ---       ---")
+    if l == 0:
+      print(f"\nRecursive Nonsmooth Trust-Region Method using {params.get('spsolver', 'SPG2')} Subproblem Solver")
+      print("level   iter          value           gnorm             del           snorm       nobjs      ngrad      nhess      nobjn      nprox    iterSP    flagSP")
+      print(f"{0:4d}   {0:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}             ---      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}       ---      ---")
 
     # Storage
     cnt['objhist'].append(val + phi)
@@ -1509,65 +997,51 @@ def trustregion(R_res,x0, problem_low,problem, params):
 
     # Check stopping criterion
     if gnorm <= gtol:
+        cnt['iflag'] = 0
         return x, cnt
 
     # Iterate
     for i in range(1, params['maxit'] + 1):
-        if hasattr(problem.obj_smooth, 'begin_counter'):
-            cnt = problem.obj_smooth.begin_counter(i, cnt)
+        if hasattr(problems[l].obj_smooth, 'begin_counter'):
+            cnt = problems[l].obj_smooth.begin_counter(i, cnt)
 
         # Solve trust-region subproblem
         params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
-        if np.linalg.norm(R_restriction@grad)>=0.5*np.linalg.norm(grad) and np.linalg.norm(R_restriction@grad)>=0.01:
-            print("Recursive step")
-            s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_two_level(
-                R_res, x,val,R_res@grad,grad,phi,problem_low,problem,params,cnt)
-        else:
-            print("Taylor step")
-            s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(
-            x, val, grad, phi, problem, params, cnt)
+        s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, phi, problems, params, cnt)
 
-        
         # Update function information
         xnew = x + s
-        xnew_low = R_res@x + s_low
-        problem.obj_smooth.update(xnew, 'trial')
-        #valnew, val, cnt = compute_value(xnew, x, val, problem.obj_smooth, pRed, params, cnt)
-        f_low,_,_ = compute_value(xnew_low,x_low,val_low,problem_low.obj_smooth,pRed,params,cnt)
-        valnew_low = f_low#+ np.dot(R_res@grad-grad_low,s_low)
-        #print(valnew_low)
-        #print(valnew)
+        problems[l].obj_smooth.update(xnew, 'trial')
+        valnew, val, cnt = compute_value(xnew, x, val, problems[l].obj_smooth, pRed, params, cnt)
 
         # Accept/reject step and update trust-region radius
-        aRed = (val + phi) - (valnew_low + phinew)
+        aRed = (val + phi) - (valnew + phinew)
         if aRed < params['eta1'] * pRed:
             params['delta'] = params['gamma1'] * min(snorm, params['delta'])
-            problem.obj_smooth.update(x, 'reject')
+            problems[l].obj_smooth.update(x, 'reject')
             if params['useInexactGrad']:
-                grad, dgrad, gnorm, cnt = compute_gradient(x, problem, params, cnt)
+                grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
         else:
             x = xnew
-            val = valnew_low
+            val = valnew
             phi = phinew
-            problem.obj_smooth.update(x, 'accept')
+            problems[l].obj_smooth.update(x, 'accept')
             grad0 = grad
-            grad, dgrad, gnorm, cnt = compute_gradient(x, problem, params, cnt)
+            grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
             if aRed > params['eta2'] * pRed:
                 params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
-
+                params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
             # Update secant
             if params['useSecant'] or params['useSecantPrecond']:
                 y = grad - grad0
-                problem.secant.update(s, y, problem.pvector, problem.dvector)
+                problems.secant.update(s, y, problems[l].pvector, problems[l].dvector)
                 if params['useSecantPrecond']:
-                    problem.prec.apply = lambda x: problem.secant.apply(x, problem.pvector, problem.dvector)
-                    problem.prec.apply_inverse = lambda x: problem.secant.apply_inverse(x, problem.pvector, problem.dvector)
+                    problems[l].prec.apply = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
+                    problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
 
         # Output iteration history
         if i % params['outFreq'] == 0:
-            print(iter_count)
-
-            print(f"  {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+            print(f"{l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
 
         # Storage
         cnt['objhist'].append(val + phi)
@@ -1583,13 +1057,13 @@ def trustregion(R_res,x0, problem_low,problem, params):
         cnt['nproxhist'].append(cnt['nprox'])
         cnt['timestor'].append(time.time() - start_time)
 
-        if hasattr(problem.obj_smooth, 'end_counter'):
-            cnt = problem.obj_smooth.end_counter(i, cnt)
+        if hasattr(problems[l].obj_smooth, 'end_counter'):
+            cnt = problems[l].obj_smooth.end_counter(i, cnt)
 
         # Check stopping criterion
         if gnorm <= gtol or snorm <= stol or i >= params['maxit']:
             if i % params['outFreq'] != 0:
-                print(f"  {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+                print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
             if gnorm <= gtol:
                 flag = 0
             elif i >= params['maxit']:
@@ -1609,10 +1083,8 @@ def trustregion(R_res,x0, problem_low,problem, params):
     else:
         print("step tolerance was met")
     print(f"Total time: {cnt['timetotal']:8.6e} seconds")
-
+    cnt['iflag'] = flag
     return x, cnt
-
-
 
 def compute_value(x, xprev, fvalprev, obj, pRed, params, cnt):
     """
@@ -1650,7 +1122,6 @@ def compute_value(x, xprev, fvalprev, obj, pRed, params, cnt):
     cnt['valtol'].append(ftol)
 
     return fval, fvalprev, cnt
-
 
 def compute_gradient(x, problem, params, cnt):
     """
@@ -1695,114 +1166,57 @@ def compute_gradient(x, problem, params, cnt):
 
     return grad, dgrad, gnorm, cnt
 
-u = np.zeros(nu)
-ftol = 1e-6
-
-#lower level model
-R_restriction = restriction_R(int(n/2),n)
-
-Burgers_low = BurgersSetup(n=256, mu=0.08, alpha=1e-4, beta=1e-2)
-n_low = Burgers_low.n
-nu_low = Burgers_low.n - 1
-nz_low = Burgers_low.n
-alpha_low = Burgers_low.alpha
-beta_low = Burgers_low.beta
-M_low = Burgers_low.M
-
-R_low = Burgers_low.R
-A_low = Burgers_low.A
-Rlump_low = Burgers_low.Rlump
-B_low = Burgers_low.B
-b_low = Burgers_low.b
-ud_low = Burgers_low.ud
-mesh_low = Burgers_low.mesh
-var_low = {
-       'beta':beta_low,
-       'n':n_low,
-       'nu':nu_low,
-       'nz':nz_low,
-       'alpha':alpha_low,
-       'A':A_low,
-       'M':M_low,
-       'R':R_low,
-       'Rlump':Rlump_low,
-       'B':B_low,
-       'b':b_low,
-       'ud':ud_low,
-       'useEuclidean': False,
-       'mesh':mesh_low
-       }
-obj_low = Objective(var_low)
-con_low = ConstraintSolver(var_low)
-red_obj_low = ReducedObjective(obj_low,con_low)
-problem = Problem()
-
-class Problem_low:
-    def __init__(self):
-        self.pvector = L2vectorPrimal(var_low)
-        self.dvector = L2vectorDual(var_low)
-        #self.obj_smooth = ReducedObjective(obj, con)
-        self.obj_smooth = red_obj_low
-        self.obj_nonsmooth = L1Norm(var_low)
-        
-problem_low = Problem_low()
-
-def trustregion_step_two_level(R_res, x,val,grad_low,grad,phi,problem_low,problem,params,cnt):
-    #can modify this to either run step or create different model?
-    problemTR               = Problem()
-    problem_low = Problem_low()
-    problemTR.obj_smooth    = modelTR(problem,params["useSecant"])
-    problemTR.obj_nonsmooth = phiPrec(problem)
-    dgrad                   = problemTR.dvector.dual(grad)
-    dgrad_low = problem_low.dvector.dual(grad_low)
-
-    s, s_low,snorm, snorm_low, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_SPG2_low(
-       R_res,R_res@x, x, val, dgrad_low, dgrad, phi, problem_low,problemTR, params, cnt)
-    cnt = problemTR.obj_smooth.addCounter(cnt)
-    cnt = problemTR.obj_nonsmooth.addCounter(cnt)
-    return s, s_low, snorm, pRed, phinew, iflag, iter_count, cnt, params
-
 def driver(savestats, name):
     print("driver started")
     np.random.seed(0)
 
     # Set up optimization problem
-    n = 512  # Number of cells
-    nu = 0.08  # Viscosity
+    n = 1024  # Number of cells
+    mu = 0.08  # Viscosity
     alpha = 1e-4  # L2 penalty parameter
     beta = 1e-2  # L1 penalty parameter
     usepc = True  # Use piecewise constant controls
     useInexact = False
-    derivCheck = True
+    derivCheck = False
+    meshlist = [n, int(n/2), int(n/4)]
+    problems = [] #problem list goes from fine to coarse
+    for i in range(0, len(meshlist)):
+        B   = BurgersSetup(meshlist[i], mu=mu, alpha=alpha, beta=beta)
+        var = B.returnVars(False)
+        if i < len(meshlist)-1:
+          R = restriction_R(meshlist[i+1], meshlist[i]) #puts R in preceeding problem
+        else:
+          R = np.eye(meshlist[i])
+        p = Problem(var, R)
+        problems.append(p)
 
 
-    obj = Objective(var)
-    con = ConstraintSolver(var)
-    var['useEuclidean'] = False
+    z = np.random.rand(n)
+    u = np.zeros(n-1)
+    x = np.hstack([u, z])
 
-    # Define the optimization problem
-    #problem = {
-    #    "obj_smooth": ReducedObjective(obj, con),
-    #    "obj_nonsmooth": L1Norm(var),
-    #    "pvector": None,
-    #    "dvector": None,
-    #}
+    # Parameters for the trust-region solver
+    params = {
+        'maxitsp': 10,
+        'lam_min': 1e-12,
+        'lam_max': 1e12,
+        't': 1,
+        'gtol': np.sqrt(np.finfo(float).eps),
+        'delta': 1.0  # Trust-region radius
+    }
 
-    if var['useEuclidean']:
-        problem.pvector = Euclidean(var)
-        problem.dvector = Euclidean(var)
-    else:
-        problem.pvector = L2vectorPrimal(var)
-        problem.dvector = L2vectorDual(var)
 
     dim = n if usepc else n + 1
 
     if derivCheck:
-        x = np.random.randn(dim)
-        d = np.random.randn(dim)
-        deriv_check_simopt(np.zeros(var['nu']), x, obj, con, 1e-4 * np.sqrt(np.finfo(float).eps))
-        deriv_check(x, d, problem, 1e-4 * np.sqrt(np.finfo(float).eps))
-        vector_check(x, d, problem)
+        for i in range(0, len(meshlist)):
+          x = np.random.randn(meshlist[i])
+          d = np.random.randn(meshlist[i])
+          obj = problems[i].obj_smooth.obj0
+          con = problems[i].obj_smooth.con0
+          deriv_check_simopt(np.zeros(problems[i].obj_nonsmooth.var['nu']), x, obj, con, 1e-4 * np.sqrt(np.finfo(float).eps))
+          deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
+          vector_check(x, d, problems[i])
 
     x0 = np.ones(dim)
     cnt = {}
@@ -1815,34 +1229,37 @@ def driver(savestats, name):
 
     # Solve optimization problem
     start_time = time.time()
-    problem.obj_smooth.reset()
-    con.reset()
-    
-    
-    
-    
-    x, cnt_tr = trustregion(R_restriction,x0,problem_low, problem, params)
-    
-        
+    for p in problems:
+      p.obj_smooth.reset()
+      p.obj_smooth.con0.reset()
+
+
+
+
+    x, cnt_tr = trustregion(0, x0, params['delta'],problems, params)
+
+
     elapsed_time = time.time() - start_time
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
-    pro_tr = problem.obj_smooth.profile()
+    pro_tr = []
+    for p in problems:
+        pro_tr.append(p.obj_smooth.profile())
 
-    cnt[1] = (cnt_tr, pro_tr)
-
+    cnt = (cnt_tr, pro_tr)
 
     print("\nSummary")
     print(
         "           niter     nobjs     ngrad     nhess     nobjn     nprox     nstat     nadjo     nssen     nasen"
     )
+
     print(
-        f"   SGP2:  {cnt[1][0]['iter']:6d}    {cnt[1][0]['nobj1']:6d}    {cnt[1][0]['ngrad']:6d}    {cnt[1][0]['nhess']:6d}    "
-        f"{cnt[1][0]['nobj2']:6d}    {cnt[1][0]['nprox']:6d}    {cnt[1][1]['nstate']:6d}    {cnt[1][1]['nadjoint']:6d}    "
+        f"   SGP2:  {cnt[0]['iter']:6d}    {cnt[0]['nobj1']:6d}    {cnt[0]['ngrad']:6d}    {cnt[0]['nhess']:6d}    "
+        f"{cnt[0]['nobj2']:6d}    {cnt[0]['nprox']:6d}    {cnt[1][1]['nstate']:6d}    {cnt[1][1]['nadjoint']:6d}    "
         f"{cnt[1][1]['nstatesens']:6d}    {cnt[1][1]['nadjointsens']:6d}"
     )
-
+    var = problems[0].obj_nonsmooth.var
     mesh = 0.5 * (var['mesh'][:-1] + var['mesh'][1:]) if usepc else var['mesh']
 
     # Plot results
@@ -1859,7 +1276,7 @@ def driver(savestats, name):
     return cnt
 
 
-cnt = driver(False, "test_run") 
+cnt = driver(False, "test_run")
 
 
 
