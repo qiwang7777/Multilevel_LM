@@ -1050,7 +1050,9 @@ def driver(savestats, name):
     beta       = 1e-4  # L1 penalty parameter
     derivCheck = False
     
-    meshlist = [NN_dim, int(NN_dim/2), int(NN_dim/4)]
+    #meshlist = [NN_dim, int(NN_dim/2), int(NN_dim/4)]
+    
+    meshlist = [NN_dim, int(NN_dim/2)]
     
     problems = [] #problem list goes from fine to coarse
     x0 = []
@@ -1111,16 +1113,21 @@ def driver(savestats, name):
     )
 
     ## Print updated weights of the first layer (fc1)
-    nnset.NN.load_state_dict(x.td)  # Load the updated parameters into the neural network
-    nnset.NN.eval()
-    state_dict_after  = nnset.NN.state_dict()
-    weights_fc1_after = state_dict_after['fc1.weight']
-    print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
+    #nnset.NN.load_state_dict(x.td)  # Load the updated parameters into the neural network
+    #nnset.NN.eval()
+    #state_dict_after  = nnset.NN.state_dict()
+    #weights_fc1_after = state_dict_after['fc1.weight']
+    #print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
 
-    # Use the updated neural network for inference or further tasks
-    updated_nn = nnset.NN
+    
+    final_nnset = NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1)
+    final_nnset.NN.load_state_dict(x.td)
+    final_nnset.NN.eval()
+
+
+    
     print("Updated neural network is stored in `updated_nn`.")
-    nnset.plot_solutions()
+    final_nnset.plot_solutions()
 
     return cnt
 
