@@ -158,6 +158,16 @@ class L1Norm:
         Dv = v.copy()
         Dv[ind] = 0
         return Dv
+    def subdiff(self,x):
+        subdiff_result = {}
+        for k,v in x.td.items():
+            subdiff_result[k] = torch.where(
+                v>0, torch.tensor(1.0),
+                torch.where(v<0,torch.tensor(-1.0),torch.tensor([-1.0,1.0]))
+            )
+            
+            
+        return subdiff_result
 
     def get_parameter(self):
         return self.var['beta']
@@ -414,33 +424,33 @@ class NNSetup:
 
             }
       return var
-    def returnVars_low(self, useEuclidean):
-      var = {'beta':self.beta,
-             'n':self.n,
-             'nu':self.n,
-             'nz':sum(p.numel() for p in self.NN_low.parameters()),
-             'alpha':self.alpha,
-             'A':self.A,
-             'M':self.M,
-             'NN':self.NN_low,
+    #def returnVars_low(self, useEuclidean):
+    #  var = {'beta':self.beta,
+    #         'n':self.n,
+    #         'nu':self.n,
+    #         'nz':sum(p.numel() for p in self.NN_low.parameters()),
+    #         'alpha':self.alpha,
+    #         'A':self.A,
+    #         'M':self.M,
+    #         'NN':self.NN_low,
             #  'R':self.R,
             #  'Rlump':self.Rlump,
             #  'B':self.B,
-             'k':self.kappa_value_list,
-             'b':self.f_value_list,
-             'ud':self.u_solution_tensor,
-             'useEuclidean':useEuclidean,
-             'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
+    #         'k':self.kappa_value_list,
+    #         'b':self.f_value_list,
+    #         'ud':self.u_solution_tensor,
+    #         'useEuclidean':useEuclidean,
+    #         'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
 
-            }
-      return var
+    #        }
+    #  return var
 
     def plot_solutions(self, pinns_solution=None):
 
         # Extract mesh coordinates
         geometry = self.domain.geometry.x[:, :2]
-        X = geometry[:, 0]
-        Y = geometry[:, 1]
+        #X = geometry[:, 0]
+        #Y = geometry[:, 1]
 
 
         # Real solution
@@ -602,6 +612,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt):
       R                       = problems[l].R
       
       Rdgrad                  = TorchVect.__matmul__(dgrad,R)
+      
       Rgnorm                  = problems[l+1].pvector.norm(Rdgrad)
     else:
       Rgnorm = 0.0
@@ -902,7 +913,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
             if aRed > params['eta2'] * pRed:
                 params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
-                params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
+                #params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
             # Update secant
             if params['useSecant'] or params['useSecantPrecond']:
                 y = grad - grad0
@@ -1044,18 +1055,32 @@ def driver(savestats, name):
 
     # Set up optimization problem
     n          = 3  # Number of cells
-    NN_dim     = 120 # Neural network nodes
+    NN_dim     = 300 # Neural network nodes
     nu         = 0.08  # Viscosity
     alpha      = 1  # L2 penalty parameter
     beta       = 1e-4  # L1 penalty parameter
     derivCheck = False
     
     #meshlist = [NN_dim, int(NN_dim/2), int(NN_dim/4)]
+    #meshlist_single = [NN_dim]
     
-    meshlist = [NN_dim, int(NN_dim/2)]
+    meshlist = [NN_dim]
+    #meshlist = [NN_dim]
     
     problems = [] #problem list goes from fine to coarse
     x0 = []
+    problems_single = []
+    
+    #for i in range(0, len(meshlist_single)):
+        
+    #    if i < len(meshlist_single)-1:
+    #      R_single = restriction_R(meshlist_single[i+1], meshlist_single[i]) #puts R in preceeding problem
+    #    else:
+    #      R_single = torch.eye(meshlist_single[i])
+    #    nnset_single = NNSetup(meshlist_single[i], n, nu, alpha, beta, R_single, n_samples=1)
+    #    var_single   = nnset_single.returnVars(False)
+    #    p_single = Problem(var_single, R_single)
+    #    problems_single.append(p_single)
     
    
     for i in range(0, len(meshlist)):
@@ -1080,7 +1105,7 @@ def driver(savestats, name):
                 vector_check(x, d, problems[i])
 
     x0 =  TorchVect(NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1).NN.state_dict())
-    
+    #x0_single = TorchVect(NNSetup(meshlist_single[0], n, nu, alpha, beta, R_single, n_samples=1).NN.state_dict())
     cnt = {}
 
     # Update default parameters
@@ -1088,10 +1113,30 @@ def driver(savestats, name):
     params["reltol"] = False
     params["t"] = 2 / alpha
     params["ocScale"] = 1 / alpha
+    
+    #Plot loss
+    #loss_values = []
+    
 
     # Solve optimization problem
     start_time   = time.time()
     x, cnt_tr    = trustregion(0, x0, params['delta'],problems, params)
+    #x_single,cnt_single = trustregion(0, x0_single, params['delta'],problems_single, params)
+    loss_history = cnt_tr['objhist']
+    #loss_history_single = cnt_single['objhist']
+    iterations = range(1, len(loss_history) + 1)
+    #iterations_single = range(1, len(loss_history_single) + 1)
+    plt.figure(figsize=(8, 6))
+    plt.plot(iterations, loss_history, marker="o", color="b")
+    #plt.plot(iterations_single, loss_history_single, marker="o", color="r")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss (Objective Function)")
+    plt.title("Loss vs Iterations in Trust-Region Optimization")
+    plt.grid(True)
+    plt.show()
+    
+        
+        
     elapsed_time = time.time() - start_time
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
@@ -1113,11 +1158,11 @@ def driver(savestats, name):
     )
 
     ## Print updated weights of the first layer (fc1)
-    #nnset.NN.load_state_dict(x.td)  # Load the updated parameters into the neural network
-    #nnset.NN.eval()
-    #state_dict_after  = nnset.NN.state_dict()
-    #weights_fc1_after = state_dict_after['fc1.weight']
-    #print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
+    nnset.NN.load_state_dict(x.td)  # Load the updated parameters into the neural network
+    nnset.NN.eval()
+    state_dict_after  = nnset.NN.state_dict()
+    weights_fc1_after = state_dict_after['fc1.weight']
+    print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
 
     
     final_nnset = NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1)
@@ -1128,6 +1173,7 @@ def driver(savestats, name):
     
     print("Updated neural network is stored in `updated_nn`.")
     final_nnset.plot_solutions()
+    
 
     return cnt
 
