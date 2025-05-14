@@ -781,41 +781,46 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt):
       cnt = problemTR.obj_nonsmooth.addCounter(cnt)
     return s, snorm, pRed, phinew, iflag, iter, cnt, params
 
+# f_{i = {0, r}} -> each of these has a value and gradient and hessian.  
+
+
 class modelTR:
-    def __init__(self, problems, secant, subtype = 'spg', l = 0, R = np.empty(1), grad = np.empty(1), x = np.empty(1)):
-        self.problem = problems[l]
-        self.var     = problems[l].var
+    def __init__(self, problems, secant, subtype = 'spg', i = 0, R = np.empty(1), grad = np.empty(1), x = np.empty(1)):
+        self.problemc = problems[i] #l+1 -> level we are going to 
+        self.problemf = problems[0] #l+1 -> level we are going to 
+        self.var     = problems[i].var
         self.secant  = secant
         self.l       = l
         self.x       = R @ x
         self.R       = R
-        self.Rgrad   = problems[l].pvector.dual(R @ grad) #should be in dual space, dgrad in primal
+        self.Rgrad   = problems[i].pvector.dual(R @ grad) #should be in dual space, dgrad in primal
         self.subtype = subtype
         self.nobj1   = 0
         self.ngrad   = 0
         self.nhess   = 0
         if subtype == 'recursive':
-            grad, _      = problems[l].obj_smooth.gradient(R @ x, 0.)
+            grad, _      = problems[i].obj_smooth.gradient(R @ x, 0.)
             self.grad    = grad
             self.ngrad  += 1
 
     def update(self, x, type):
-        self.problem.obj_smooth.update(x, type)
+        self.problemc.obj_smooth.update(x, type)
+        self.problemf.obj_smooth.update(x, type)
     def value(self, x, ftol):
-        val, ferr    = self.problem.obj_smooth.value(x, ftol)
+        val, ferr    = self.problemc.obj_smooth.value(x, ftol) #ok since we evaluate the lower level model
         if self.subtype == 'recursive':
-          # val      += self.problem.dvector.apply(self.Rgrad - 0.*self.grad, x - self.x)
-          val      += self.problem.dvector.apply(self.Rgrad, x - self.x)
+          #gradf, _  = self.problemf.obj_smooth.gradient(x, ftol) #evaluates high level gradient
+          #self.Rgrad   = self.problemf.pvector.dual(R @ gradf) #should be in dual space, dgrad in primal
+          val      += self.problem.pvector.apply(self.Rgrad - self.grad, x - self.x)
           ferr      = 0
         self.nobj1 += 0
         return val, ferr
     def gradient(self,x,gtol):
-      grad, gerr      = self.problem.obj_smooth.gradient(x, gtol)
-      if self.subtype == 'recursive':
-        # grad        += self.Rgrad - 0.*self.grad
-        grad        += self.Rgrad
-        self.ngrad += 0
-      return grad, gerr
+      # takes R\nabla f_{0} (x)
+      grad, gerr   = self.problemf.obj_smooth.gradient(x, gtol)
+      self.Rgrad   = R @ grad
+      self.ngrad  += 0
+      return self.Rgrad, gerr
     def hessVec(self,v,x,htol):
       if (self.secant):
         hv          = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
