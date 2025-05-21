@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from Multilevel_LM.non_smooth.TorchVector import TorchVect
+from .TorchVector import TorchVect
 #Derivative check
 def deriv_check_simopt(u0, z0, obj, con, tol):
     """

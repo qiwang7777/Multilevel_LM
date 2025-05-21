@@ -1,4 +1,7 @@
 #Reduced Objective Function
+import os
+import sys
+sys.path.append(os.path.abspath('..'))
 import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -10,184 +13,37 @@ from mpi4py import MPI
 import dolfinx.fem.petsc
 import dolfinx.nls.petsc
 
-import time
-#from Multilevel_LM.non_smooth.TorchVector import TorchVect
+import time, torch
+from non_smooth.TorchVector import TorchVect
+from non_smooth.L2Vectors import L2TVPrimal, L2TVDual
+from non_smooth.checks import deriv_check, deriv_check_simopt, vector_check
+from non_smooth.setDefaultParameters import set_default_parameters
+from non_smooth.Problem import Problem
+from non_smooth.trustregion import trustregion
+from non_smooth.L1norm import L1TorchNorm
 
-from Multilevel_LM.non_smooth.checks import deriv_check, deriv_check_simopt, vector_check
-from Multilevel_LM.non_smooth.setDefaultParameters import set_default_parameters
-#TorchVector
-import copy, torch
-class TorchVect:
-    @torch.no_grad()
-    def __init__(self, tensordict): #store tensor dictionary
-        self.td = tensordict
-    @torch.no_grad()
-    def clone(self):
-        td  = copy.deepcopy(self.td)
-        ans = TorchVect(td)
-        ans.zero()
-        return ans
-    @torch.no_grad()
-    def zero(self):
-        for _, v in self.td.items():
-            v.zero_()
-    @torch.no_grad()
-    def __add__(self, other):
-        temp = other.clone()
-        for k, v in self.td.items():
-            temp.td[k] = other.td[k] + v
-        return temp
-    @torch.no_grad()
-    def __sub__(self, other):
-        temp = other.clone()
-        for k, v, in self.td.items():
-           temp.td[k] = other.td[k] - v
-        return -1*temp
-    @torch.no_grad()
-    def __mul__(self, alpha):
-      ans = self.clone()
-      for k, v in self.td.items():
-          ans.td[k].add_(v, alpha = alpha)
-      return ans
-    @torch.no_grad()
-    def __rmul__(self, alpha):
-        return self.__mul__(alpha)
-    @torch.no_grad()
-    def __matmul__(self, R):
-        ans = self.clone()
-        for k,v in self.td.items():
-            
-            
-            if k == 'fc1.weight':
-                ans.td[k] = R @ v
-            elif k == 'fc1.bias':
-                ans.td[k] = R @ v
-            elif k =='fc2.weight':
-                
-                ans.td[k] = R @ v @ R.T
-            elif k =='fc2.bias':
-                ans.td[k] = R @ v
-            elif k == 'fc3.weight':
-                ans.td[k] = v @ R.T
-            else:
-                ans.td[k] = v 
-        return ans
-    @torch.no_grad()
-    def __truediv__(self, alpha):
-        ans = self.clone()
-        for k, v in self.td.items():
-            ans.td[k].add_(v, alpha = 1/alpha)
-        return ans
-    @torch.no_grad()
-    def __rtruediv__(self, alpha):
-        return self.__truediv__(alpha)
-# Problem Class
-class L2vectorPrimal:
-    def __init__(self, var):
-        self.var = var
-    @torch.no_grad()
-    def dot(self, x, y):
-        ans = 0
-        for k, v in x.td.items():
-            ans += torch.sum(torch.mul(v, y.td[k]))
-        return ans.item()
-    @torch.no_grad()
-    def apply(self, x, y):
-        return self.dot(x, y)
-    @torch.no_grad()
-    def norm(self, x):
-        return np.sqrt(self.dot(x, x))
-    @torch.no_grad()
-    def dual(self, x):
-        return x
-class L2vectorDual:
-    def __init__(self, var):
-        self.var = var
-    @torch.no_grad()
-    def dot(self, x, y):
-        ans = 0
-        for k, v in x.td.items():
-            ans += torch.sum(torch.mul(v, y.td[k]))
-        return ans.item()
-    @torch.no_grad()
-    def apply(self, x, y):
-        return self.dot(x,y)
-    @torch.no_grad()
-    def norm(self, x):
-        return np.sqrt(self.dot(x, x))
-    @torch.no_grad()
-    def dual(self, x):
-        return x
-class L1Norm:
-    def __init__(self, var):
-        self.var = var
-
-    def value(self, x):
-        val = 0
-        for k, v in x.td.items():
-            val += torch.sum(torch.abs(v))
-        return self.var['beta'] * val
-
-    def prox(self, x, t):
-        temp = x.clone()
-        for k, v in x.td.items():
-            temp.td[k] = torch.max(torch.tensor([0.0]), torch.abs(v) - t*self.var['beta'])*torch.sign(v)
-        # return np.maximum(0, np.abs(x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(x)
-        return temp
-
-    def dir_deriv(self, s, x):
-        sx = np.sign(x)
-        return self.var['beta'] * (np.dot(sx.T, s) + np.dot((1 - np.abs(sx)).T, np.abs(s)))
-
-    def project_sub_diff(self, g, x):
-        sx = np.sign(x)
-        return self.var['beta'] * sx + (1 - np.abs(sx)) * np.clip(g, -self.var['beta'], self.var['beta'])
-
-    def gen_jac_prox(self, x, t):
-        d = np.ones_like(x)
-        px = self.prox(x, t)
-        ind = px == 0
-        d[ind] = 0
-        return np.diag(d), ind
-
-    def apply_prox_jacobian(self, v, x, t):
-        if self.var['useEuclidean']:
-            ind = np.abs(x) <= t * self.var['Rlump'] * self.var['beta']
-        else:
-            ind = np.abs(x) <= t * self.var['beta']
-        Dv = v.copy()
-        Dv[ind] = 0
-        return Dv
-    def subdiff(self,x):
-        subdiff_result = {}
-        for k,v in x.td.items():
-            subdiff_result[k] = torch.where(
-                v>0, torch.tensor(1.0),
-                torch.where(v<0,torch.tensor(-1.0),torch.tensor([-1.0,1.0]))
-            )
-            
-            
-        return subdiff_result
-
-    def get_parameter(self):
-        return self.var['beta']
-class Problem:
-    def __init__(self, var,R):
-        self.var = var
-        self.pvector = L2vectorPrimal(var)
-        self.dvector = L2vectorDual(var)
-        self.obj_smooth = NNObjective(var)
-        self.obj_nonsmooth = L1Norm(var)
-        self.R = R
 
 # Restriction operator
-def restriction_R(m,n):
-    matrix_R = torch.zeros((m,n), dtype=torch.float64)
-    for i in range(m):
-        matrix_R[i,2*(i+1)-1] = 1/np.sqrt(2)
-        matrix_R[i,2*i] = 1/np.sqrt(2)
+def restriction_R(m, n, x):
+    matrix_R = x.clone()
+    for k, v in matrix_R.td.items():
+      matrix_R.td[k] = torch.zeros(v.size(), dtype=torch.float64)
+      print(m,n,v.size())
+      for i in range(m):
+          matrix_R.td[k][i,2*(i+1)-1] = 1/np.sqrt(2)
+          matrix_R.td[k][i,2*i]       = 1/np.sqrt(2)
     return matrix_R
 
+#Recursive step
+def Reye(x):
+    if x is np.ndarray:
+      matrix_R = np.eye(x.shape[0])
+    else:
+      matrix_R = x.clone()
+      for k, v in matrix_R.td.items():
+        matrix_R.td[k] = torch.eye(x.td[k].size()[0], dtype=torch.float64)
+
+    return matrix_R
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(FullyConnectedNN, self).__init__()
@@ -204,32 +60,6 @@ class FullyConnectedNN(nn.Module):
         x = self.activation(self.fc2(x))
         x = self.fc3(x)
         return x
-
-#class ReducedNN(nn.Module):
-#    def __init__(self, original_nn, R):
-#        super(ReducedNN, self).__init__()
-#        self.input_dim   = original_nn.input_dim
-#        self.hidden_half = int(original_nn.hidden_dim/2)
-#        self.output_dim  = original_nn.output_dim
-#        self.fc1         = nn.Linear(self.input_dim, self.hidden_half)
-#        self.fc2         = nn.Linear(self.hidden_half, self.hidden_half)
-#        self.fc3         = nn.Linear(self.hidden_half, self.output_dim)
-
-        # Transform weights and biases
-#        self.fc1.weight.data =  R @ original_nn.fc1.weight.data
-#        self.fc1.bias.data   = (R @ original_nn.fc1.bias.data.unsqueeze(1)).squeeze()
-#
-#        self.fc2.weight.data =  R @ original_nn.fc2.weight.data @ R.T
-#        self.fc2.bias.data   = (R @ original_nn.fc2.bias.data.unsqueeze(1)).squeeze()
-
-#        self.fc3.weight.data = original_nn.fc3.weight.data @ R.T
-#        self.fc3.bias.data   = original_nn.fc3.bias.data
-
-#    def forward(self, x):
-#        x = torch.relu(self.fc1(x))
-#        x = torch.relu(self.fc2(x))
-#        x = self.fc3(x)
-#        return x
 
 class NNObjective:
     def __init__(self, var):
@@ -248,7 +78,7 @@ class NNObjective:
         # pde_residual = pde[self.domain_mask] - f_domain
         pde_residual = pde - f_domain.T
         loss_pde = 0.5*torch.matmul(torch.matmul(self.var['M'], pde_residual).T, pde_residual)
-        
+
         val = loss_pde.squeeze() # reduce dims for some reason
         #loss = loss_boundary
         return val
@@ -283,7 +113,7 @@ class NNSetup:
     """
     Solve the NN control problem
     """
-    def __init__(self, NN_dim, n, mu, alpha, beta, R, n_samples = 1):
+    def __init__(self, NN_dim, n, mu, alpha, beta, n_samples = 1):
         self.n      = n
         self.NN_dim = NN_dim
         self.nsamps = n_samples
@@ -307,15 +137,13 @@ class NNSetup:
         self.beta  = beta
         self.alpha = alpha
         self.mu    = mu
-        self.R     = R
+        self.R     = []
 
 
 
         self.NN    = FullyConnectedNN((n+1)**2, NN_dim, (n+1)**2)
-        #Res = restriction_R(int(self.NN.hidden_dim/2),self.NN.hidden_dim)
         self.NN.to(torch.float64)
-        #self.NN_low = ReducedNN(self.NN,self.R)
-        
+
         t = self.generate_fenics_data()
         self.kappa_value_list  = t[0]
         self.f_value_list      = t[1]
@@ -413,37 +241,13 @@ class NNSetup:
              'A':self.A,
              'M':self.M,
              'NN':self.NN,
-            #  'R':self.R,
-            #  'Rlump':self.Rlump,
-            #  'B':self.B,
              'k':self.kappa_value_list,
              'b':self.f_value_list,
              'ud':self.u_solution_tensor,
              'useEuclidean':useEuclidean,
              'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
-
             }
       return var
-    #def returnVars_low(self, useEuclidean):
-    #  var = {'beta':self.beta,
-    #         'n':self.n,
-    #         'nu':self.n,
-    #         'nz':sum(p.numel() for p in self.NN_low.parameters()),
-    #         'alpha':self.alpha,
-    #         'A':self.A,
-    #         'M':self.M,
-    #         'NN':self.NN_low,
-            #  'R':self.R,
-            #  'Rlump':self.Rlump,
-            #  'B':self.B,
-    #         'k':self.kappa_value_list,
-    #         'b':self.f_value_list,
-    #         'ud':self.u_solution_tensor,
-    #         'useEuclidean':useEuclidean,
-    #         'mesh':torch.tensor(self.domain.geometry.x[:,0:1], dtype=torch.float64).T
-
-    #        }
-    #  return var
 
     def plot_solutions(self, pinns_solution=None):
 
@@ -493,711 +297,6 @@ class NNSetup:
         plt.tight_layout()
         plt.show()
 
-#Subsolver for Taylor model
-def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
-    params.setdefault('maxitsp', 10)
-    params.setdefault('lam_min', 1e-12)
-    params.setdefault('lam_max', 1e12)
-    params.setdefault('t', 1)
-    params.setdefault('gtol', np.sqrt(np.finfo(float).eps))
-
-    safeguard = 1e2 * np.finfo(float).eps
-
-    x0 = x
-    g0 = dgrad
-    snorm = 0
-
-    # Evaluate model at GCP
-    sHs = 0
-    gs = 0
-    valold = val
-    phiold = phi
-    valnew = valold
-    phinew = phiold
-
-    t0 = max(params['lam_min'], min(params['lam_max'], params['t'] / problem.pvector.norm(dgrad)))
-
-    # Set exit flag
-    iter_count = 0
-    iflag = 1
-
-    for iter0 in range(1, params['maxitsp'] + 1):
-        snorm0 = snorm
-
-        # Compute step
-        x1 = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
-        s = x1 - x0
-
-        # Check optimality conditions
-        gnorm = problem.pvector.norm(s)
-        if gnorm / t0 <= params.get('tolsp', 0) and iter_count > 1:
-            iflag = 0
-            break
-
-        # Compute relaxation parameter
-        alphamax = 1
-        snorm = problem.pvector.norm(x1 - x)
-        if snorm >= params['delta'] - safeguard:
-            ds = problem.pvector.dot(s, x0 - x)
-            dd = gnorm ** 2
-            alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
-
-        #Hs = red_obj.hessVec(v, z, htol)[0]
-        Hs = problem.obj_smooth.hessVec(s, x, params['gtol'])[0]
-
-        sHs = problem.dvector.apply(Hs, s)
-        g0s = problem.pvector.dot(g0, s)
-        phinew = problem.obj_nonsmooth.value(x1)
-        #eps = 1e-12
-        alpha0 = max(-(g0s + phinew - phiold), gnorm ** 2 / t0) / sHs
-
-        if sHs <= safeguard:
-            alpha = alphamax
-            if 0.5 * alphamax < alpha0 and iter0 > 1:
-                alpha = 0
-                phinew = phiold
-                valnew = valold
-                snorm = snorm0
-                iflag = 3
-                break
-        else:
-            alpha = min(alphamax, alpha0)
-
-        # Update iterate
-        if alpha == 1:
-            x0 = x1
-            g0 = problem.dvector.dual(Hs) + g0
-            valnew = valold + g0s + 0.5 * sHs
-        else:
-            x0 = x0 + alpha * s
-            g0 = alpha * problem.dvector.dual(Hs) + g0
-            valnew = valold + alpha * g0s + 0.5 * alpha ** 2 * sHs
-            phinew = problem.obj_nonsmooth.value(x0)
-            snorm = problem.pvector.norm(x0 - x)
-
-        # Update model information
-        valold = valnew
-        phiold = phinew
-
-        # Check step size
-        if snorm >= params['delta'] - safeguard:
-            iflag = 2
-            break
-
-        norm_g0 = problem.pvector.norm(g0)
-
-        # Update spectral step length
-        if sHs <= safeguard:
-            #if norm_g0 == 0:
-                #norm_g0 = eps
-
-            lambdaTmp = params['t'] / norm_g0
-
-        else:
-            lambdaTmp = gnorm ** 2 / sHs
-
-        t0 = max(params['lam_min'], min(params['lam_max'], lambdaTmp))
-
-    s = x0 - x
-    pRed = (val + phi) - (valnew + phinew)
-
-    iter_count = max(iter_count, iter0)
-    return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
-
-def trustregion_step_SPG2_Low(xhigh,xlow, val, dgrad, phi, problem, problemhigh,R,params, cnt):
-    
-    params.setdefault('maxitsp', 10)
-    params.setdefault('lam_min', 1e-12)
-    params.setdefault('lam_max', 1e12)
-    params.setdefault('t', 1)
-    params.setdefault('gtol', np.sqrt(np.finfo(float).eps))
-
-    safeguard = 1e2 * np.finfo(float).eps
-
-    x0 = xlow
-    g0 = dgrad
-    snorm = 0
-
-    # Evaluate model at GCP
-    sHs = 0
-    gs = 0
-    valold = val
-    phiold = phi
-    valnew = valold
-    phinew = phiold
-
-    t0 = max(params['lam_min'], min(params['lam_max'], params['t'] / problem.pvector.norm(dgrad)))
-
-    # Set exit flag
-    iter_count = 0
-    iflag = 1
-
-    for iter0 in range(1, params['maxitsp'] + 1):
-        snorm0 = snorm
-
-        # Compute step
-        x1 = R*problemhigh.obj_nonsmooth.prox(xhigh - t0 * g0, t0) #In low level
-        s = x1 - x0 #in low level
-
-        # Check optimality conditions
-        gnorm = problem.pvector.norm(s)
-        if gnorm / t0 <= params.get('tolsp', 0) and iter_count > 1:
-            iflag = 0
-            break
-
-        # Compute relaxation parameter
-        alphamax = 1
-        snorm = problem.pvector.norm(x1 - xlow)
-        if snorm >= params['delta'] - safeguard:
-            ds = problem.pvector.dot(s, x0 - xlow)
-            dd = gnorm ** 2
-            alphamax = min(1, (-ds + np.sqrt(ds ** 2 + dd * (params['delta'] ** 2 - snorm0 ** 2))) / dd)
-
-        #Hs = red_obj.hessVec(v, z, htol)[0]
-        Hs = problem.obj_smooth.hessVec(s, xlow, params['gtol'])[0]
-
-        sHs = problem.dvector.apply(Hs, s)
-        g0s = problem.pvector.dot(g0, s)
-        #phinew = problem.obj_nonsmooth.value(x1)
-        phinew = problemhigh.obj_nonsmooth.value(xhigh+R.T*s)
-        #eps = 1e-12
-        alpha0 = max(-(g0s + phinew - phiold), gnorm ** 2 / t0) / sHs
-
-        if sHs <= safeguard:
-            alpha = alphamax
-            if 0.5 * alphamax < alpha0 and iter0 > 1:
-                alpha = 0
-                phinew = phiold
-                valnew = valold
-                snorm = snorm0
-                iflag = 3
-                break
-        else:
-            alpha = min(alphamax, alpha0)
-
-        # Update iterate
-        if alpha == 1:
-            x0 = x1
-            g0 = problem.dvector.dual(Hs) + g0
-            valnew = valold + g0s + 0.5 * sHs
-        else:
-            x0 = x0 + alpha * s
-            g0 = alpha * problem.dvector.dual(Hs) + g0
-            valnew = valold + alpha * g0s + 0.5 * alpha ** 2 * sHs
-            phinew = problem.obj_nonsmooth.value(x0)
-            snorm = problem.pvector.norm(x0 - xlow)
-
-        # Update model information
-        valold = valnew
-        phiold = phinew
-
-        # Check step size
-        if snorm >= params['delta'] - safeguard:
-            iflag = 2
-            break
-
-        norm_g0 = problem.pvector.norm(g0)
-
-        # Update spectral step length
-        if sHs <= safeguard:
-            #if norm_g0 == 0:
-                #norm_g0 = eps
-
-            lambdaTmp = params['t'] / norm_g0
-
-        else:
-            lambdaTmp = gnorm ** 2 / sHs
-
-        t0 = max(params['lam_min'], min(params['lam_max'], lambdaTmp))
-
-    s = x0 - xlow
-    pRed = (val + phi) - (valnew + phinew)
-
-    iter_count = max(iter_count, iter0)
-    return s, snorm, pRed, phinew, iflag, iter_count, cnt, params
-
-def trustregion_step(l,x,val,grad,phi,problems,params,cnt):
-    #fine level l comes in
-    dgrad                   = problems[l].dvector.dual(grad)#dual(grad) puts in primal space
-    pgrad                   = problems[l].obj_nonsmooth.prox(x-params['ocScale']*dgrad,params['ocScale'])
-    L                       = len(problems)
-    if l < L-1:
-        
-        R                       = problems[l].R
-      
-      
-      
-        Rh                      = TorchVect.__matmul__(pgrad-x,R)
-        Rhnorm                  = problems[l+1].pvector.norm(Rh)/params['ocScale'] #Low level
-      
-    else:
-        Rhnorm = 0.0
-        hnorm                   = problems[l].pvector.norm(dgrad)
-    hnorm = problems[l].pvector.norm(pgrad-x)/params['ocScale'] 
-
-    if Rhnorm > 0.5*hnorm and Rhnorm >= 1e-3: #note: counters are off
-      problemsL = [] #problem list goes from fine to coarse
-      for i in range(0, L):
-        if i == l+1:
-          #print("debug")
-          
-          p               = Problem(problems[i].obj_nonsmooth.var, problems[i].R) #make next level problem quadratic
-          p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = i, R = problems[i-1].R, grad = grad, x = x)
-          p.obj_nonsmooth = phiPrec(problems[l-1], R = problems[i-1].R)
-          # d = np.random.randn(R.shape[0],)
-          # deriv_check(R @ x, d, p, 1e-4 * np.sqrt(np.finfo(float).eps))
-          # stp
-          problemsL.append(p)
-        else:
-          problemsL.append(problems[i])
-      Deltai           = params['delta']
-      xnew, cnt_coarse = trustregion(l+1, TorchVect.__matmul__(x,R), Deltai, problemsL, params)
-      #recompute snorm, pRed, phinew
-      params['delta'] = Deltai
-      s               = TorchVect.__matmul__(xnew,R.T) - x
-      snorm           = problems[l].pvector.norm(s)
-      #check L = f_{i-1} + <R g, s> + phi_{i-1}(x0 + s)
-      #m = L + phi_i - phi_{i-1} so M = f_{i-1} + <Rg, s> + \phi_i
-      phinew = problems[l].obj_nonsmooth.value(x + s)
-      cnt['nobj2'] += 1
-      valnew, _ = problemsL[l+1].obj_smooth.value(xnew, 0.0)
-      pRed   = val + phi - valnew - phinew
-      iflag  = cnt_coarse['iflag']
-      iter   = cnt_coarse['iter']
-      cnt    = problemsL[l+1].obj_smooth.addCounter(cnt)
-      cnt    = problemsL[l+1].obj_nonsmooth.addCounter(cnt)
-    else:
-      R                       = torch.eye(x.td['fc1.bias'].shape[0],dtype=torch.float64)
-      
-      problemTR               = Problem(problems[l].var, R)
-      problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, grad = grad, x = x)
-      problemTR.obj_nonsmooth = phiPrec(problems[l], R = R)
-      # d = np.random.randn((x.shape[0]))
-      # deriv_check(x, d, problemTR, 1e-4 * np.sqrt(np.finfo(float).eps))
-      s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(x, val, dgrad, phi, problemTR, params, cnt)
-      cnt = problemTR.obj_smooth.addCounter(cnt)
-      cnt = problemTR.obj_nonsmooth.addCounter(cnt)
-    return s, snorm, pRed, phinew, iflag, iter, cnt, params
-
-
-class modelTR:
-    def __init__(self, problems, secant, subtype = 'spg', l = 0, R = torch.empty(1), grad = torch.empty(1), x = torch.empty(1)):
-        self.problem = problems[l]
-        self.var     = problems[l].var
-        self.secant  = secant
-        self.l       = l
-        #print("debug")
-        #print(x.shape)
-
-        self.x       = TorchVect.__matmul__(x,R)
-        self.R       = R
-        self.Rgrad   = problems[l].pvector.dual(TorchVect.__matmul__(grad,R)) #should be in dual space, dgrad in primal
-        self.subtype = subtype
-        self.nobj1   = 0
-        self.ngrad   = 0
-        self.nhess   = 0
-        if subtype == 'recursive':
-            grad, _      = problems[l].obj_smooth.gradient(TorchVect.__matmul__(x,R), 0.)
-            self.grad    = grad
-            self.ngrad  += 1
-
-    def update(self, x, type):
-        self.problem.obj_smooth.update(x, type)
-    def value(self, x, ftol):
-        val, ferr    = self.problem.obj_smooth.value(x, ftol)
-        if self.subtype == 'recursive':
-          # val      += self.problem.dvector.apply(self.Rgrad - 0.*self.grad, x - self.x)
-          val      += self.problem.dvector.apply(self.Rgrad, x - self.x)
-          ferr      = 0
-        self.nobj1 += 0
-        return val, ferr
-    def gradient(self,x,gtol):
-      grad, gerr      = self.problem.obj_smooth.gradient(x, gtol)
-      if self.subtype == 'recursive':
-        # grad        += self.Rgrad - 0.*self.grad
-        grad        += self.Rgrad
-        self.ngrad += 0
-      return grad, gerr
-    def hessVec(self,v,x,htol):
-      if (self.secant):
-        hv          = self.problem.secant.apply(v,self.problem.pvector,self.problem.dvector)
-        herr        = 0
-      else:
-        hv, herr    = self.problem.obj_smooth.hessVec(v, x, htol)
-        self.nhess += 1
-      return hv, herr
-    def addCounter(self,cnt):
-        #actually zero because you should eval in subprob?
-        cnt["nobj1"] += self.nobj1
-        cnt["ngrad"] += self.ngrad
-        cnt["nhess"] += self.nhess
-        return cnt
-    
-class phiPrecLevelup: # you can definitely clean this up and inherit a bunch of stuff but
-               # we can be explicit for now, here x is in high level, problem is also in high level
-    def __init__(self, x, problem, R = np.empty(1)):
-        self.problem   = problem
-        self.var       = problem.obj_nonsmooth.var
-        self.R         = R
-        self.x = x
-        self.nobj2     = 0
-        self.nprox     = 0
-    def value(self, x):
-        val             = self.problem.obj_nonsmooth.value(x)
-        self.nobj2     += 1
-        return val
-    def prox(self, x, t):
-        #px          = x + TorchVect.__matmul__((self.problem.obj_nonsmooth.prox(TorchVect.__matmul__(x,self.R.T), t) - TorchVect.__matmul__(x,self.R.T)),self.R)
-        px = TorchVect.__matmul__(self.problem.obj_nonsmooth.prox(x,t),self.R)
-        self.nprox += 1
-        return px
-    def addCounter(self, cnt):
-        cnt["nobj2"] += self.nobj2
-        cnt["nprox"] += self.nprox
-        return cnt
-    def genJacProx(self, x, t):
-        D, ind = self.problem.obj_nonsmooth.genJacProx(x, t)
-        return D, ind
-    def applyProxJacobian(self, v, x, t):
-        Dv = self.problem.obj_nonsmooth.applyProxJacobian(v, x, t)
-        return Dv
-    def getParameter(self):
-        return self.problem.obj_nonsmooth.getParameter()
-
-class phiPrec: # you can definitely clean this up and inherit a bunch of stuff but
-               # we can be explicit for now
-    def __init__(self, problem, R = np.empty(1)):
-        self.problem   = problem
-        self.var       = problem.obj_nonsmooth.var
-        self.R         = R
-        self.nobj2     = 0
-        self.nprox     = 0
-    def value(self, x):
-        val             = self.problem.obj_nonsmooth.value(TorchVect.__matmul__(x,self.R.T))
-        self.nobj2     += 1
-        return val
-    def prox(self, x, t):
-        px          = x + TorchVect.__matmul__((self.problem.obj_nonsmooth.prox(TorchVect.__matmul__(x,self.R.T), t) - TorchVect.__matmul__(x,self.R.T)),self.R)
-        self.nprox += 1
-        return px
-    def addCounter(self, cnt):
-        cnt["nobj2"] += self.nobj2
-        cnt["nprox"] += self.nprox
-        return cnt
-    def genJacProx(self, x, t):
-        D, ind = self.problem.obj_nonsmooth.genJacProx(x, t)
-        return D, ind
-    def applyProxJacobian(self, v, x, t):
-        Dv = self.problem.obj_nonsmooth.applyProxJacobian(v, x, t)
-        return Dv
-    def getParameter(self):
-        return self.problem.obj_nonsmooth.getParameter()
-
-def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
-    """
-    Trust-region optimization algorithm.
-
-    Parameters:
-    x0 (np.array): Initial guess for the control variable.
-    problem (Problem): Problem class containing objective functions and vector spaces.
-    params (dict): Dictionary of algorithmic parameters.
-
-    Returns:
-    x (np.array): Optimized control variable.
-    cnt (dict): Dictionary of counters and history.
-    """
-    start_time = time.time()
-
-    # Check and set default parameters
-    params.setdefault('outFreq', 1)
-    params.setdefault('initProx', False)
-    params.setdefault('t', 1.0)
-    params.setdefault('maxit', 100)
-    params.setdefault('reltol', False)
-    params.setdefault('gtol', 1e-6)
-    params.setdefault('stol', 1e-6)
-    params.setdefault('ocScale', 1.0)
-    params.setdefault('atol', 1e-4)
-    params.setdefault('rtol', 1e-2)
-    params.setdefault('spexp', 2)
-    params.setdefault('eta1', 1e-4)
-    params.setdefault('eta2', 0.75)
-    params.setdefault('gamma1', 0.25)
-    params.setdefault('gamma2', 10.0)
-    params.setdefault('delta', 1.0)
-    params.setdefault('deltamax', 1e10)
-    params.setdefault('useSecant', False)
-    params.setdefault('useSecantPrecond', False)
-    params.setdefault('secantType', 2)
-    params.setdefault('secantSize', 10)
-    params.setdefault('initScale', 1.0)
-    params.setdefault('useDefault', True)
-    params.setdefault('useInexactObj', False)
-    params.setdefault('etascale', 1 - 1e-3)
-    params.setdefault('maxValTol', 1)
-    params.setdefault('scaleValTol', 1e0)
-    params.setdefault('forceValTol', 1 - 1e-3)
-    params.setdefault('expValTol', 0.9)
-    params.setdefault('useInexactGrad', False)
-    params.setdefault('maxGradTol', 1)
-    params.setdefault('scaleGradTol', 1e0)
-
-    # Initialize counters
-    cnt = {
-        'AlgType': f"TR-{params.get('spsolver', 'SPG2')}",
-        'iter': 0,
-        'nobj1': 0,
-        'ngrad': 0,
-        'nhess': 0,
-        'nobj2': 0,
-        'nprox': 0,
-        'nprec': 0,
-        'timetotal': 0,
-        'objhist': [],
-        'obj1hist': [],
-        'obj2hist': [],
-        'gnormhist': [],
-        'snormhist': [],
-        'deltahist': [],
-        'nobj1hist': [],
-        'nobj2hist': [],
-        'ngradhist': [],
-        'nhesshist': [],
-        'nproxhist': [],
-        'timestor': [],
-        'valerr': [],
-        'valtol': [],
-        'graderr': [],
-        'gradtol': []
-    }
-
-    # Compute initial function information
-    if hasattr(problems[l].obj_smooth, 'begin_counter'):
-        cnt = problems[l].obj_smooth.begin_counter(0, cnt)
-
-    if params['initProx']:
-        x = problems[l].obj_nonsmooth.prox(x0, 1)
-        cnt['nprox'] += 1
-    else:
-        x = x0
-
-    problems[l].obj_smooth.update(x, 'init')
-    ftol = 1e-12
-    if params['useInexactObj']:
-        ftol = params['maxValTol']
-    params['delta'] = min(params['delta'], Deltai)
-    val, _      = problems[l].obj_smooth.value(x, ftol)
-
-    cnt['nobj1'] += 1
-
-    grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-    phi = problems[l].obj_nonsmooth.value(x)
-    cnt['nobj2'] += 1
-
-    if hasattr(problems[l].obj_smooth, 'end_counter'):
-        cnt = problems[l].obj_smooth.end_counter(0, cnt)
-
-    if params['useSecantPrecond']:
-        problems[l].prec.apply         = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
-        problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
-
-    # Output header
-    if l == 0:
-      print(f"\nRecursive Nonsmooth Trust-Region Method using {params.get('spsolver', 'SPG2')} Subproblem Solver")
-      print("level   iter          value           gnorm             del           snorm       nobjs      ngrad      nhess      nobjn      nprox    iterSP    flagSP")
-      print(f"{0:4d}   {0:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}             ---      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}       ---      ---")
-
-    # Storage
-    cnt['objhist'].append(val + phi)
-    cnt['obj1hist'].append(val)
-    cnt['obj2hist'].append(phi)
-    cnt['gnormhist'].append(gnorm)
-    cnt['snormhist'].append(np.nan)
-    cnt['deltahist'].append(params['delta'])
-    cnt['nobj1hist'].append(cnt['nobj1'])
-    cnt['nobj2hist'].append(cnt['nobj2'])
-    cnt['ngradhist'].append(cnt['ngrad'])
-    cnt['nhesshist'].append(cnt['nhess'])
-    cnt['nproxhist'].append(cnt['nprox'])
-    cnt['timestor'].append(np.nan)
-
-    # Set optimality tolerance
-    gtol = params['gtol']
-    stol = params['stol']
-    if params['reltol']:
-        gtol = params['gtol'] * gnorm
-        stol = params['stol'] * gnorm
-
-    # Check stopping criterion
-    if gnorm <= gtol:
-        cnt['iflag'] = 0
-        return x, cnt
-
-    # Iterate
-    for i in range(1, params['maxit'] + 1):
-        if hasattr(problems[l].obj_smooth, 'begin_counter'):
-            cnt = problems[l].obj_smooth.begin_counter(i, cnt)
-
-        # Solve trust-region subproblem
-        params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
-        s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, phi, problems, params, cnt)
-
-        # Update function information
-        xnew = x + s
-        problems[l].obj_smooth.update(xnew, 'trial')
-        valnew, val, cnt = compute_value(xnew, x, val, problems[l].obj_smooth, pRed, params, cnt)
-
-        # Accept/reject step and update trust-region radius
-        aRed = (val + phi) - (valnew + phinew)
-        if aRed < params['eta1'] * pRed:
-            params['delta'] = params['gamma1'] * min(snorm, params['delta'])
-            problems[l].obj_smooth.update(x, 'reject')
-            if params['useInexactGrad']:
-                grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-        else:
-            x = xnew
-            val = valnew
-            phi = phinew
-            problems[l].obj_smooth.update(x, 'accept')
-            grad0 = grad
-            grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-            if aRed > params['eta2'] * pRed:
-                params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
-                params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
-            # Update secant
-            if params['useSecant'] or params['useSecantPrecond']:
-                y = grad - grad0
-                problems.secant.update(s, y, problems[l].pvector, problems[l].dvector)
-                if params['useSecantPrecond']:
-                    problems[l].prec.apply = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
-                    problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
-
-        # Output iteration history
-        if i % params['outFreq'] == 0:
-            print(f"{l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
-
-        # Storage
-        cnt['objhist'].append(val + phi)
-        cnt['obj1hist'].append(val)
-        cnt['obj2hist'].append(phi)
-        cnt['gnormhist'].append(gnorm)
-        cnt['snormhist'].append(snorm)
-        cnt['deltahist'].append(params['delta'])
-        cnt['nobj1hist'].append(cnt['nobj1'])
-        cnt['nobj2hist'].append(cnt['nobj2'])
-        cnt['ngradhist'].append(cnt['ngrad'])
-        cnt['nhesshist'].append(cnt['nhess'])
-        cnt['nproxhist'].append(cnt['nprox'])
-        cnt['timestor'].append(time.time() - start_time)
-
-        if hasattr(problems[l].obj_smooth, 'end_counter'):
-            cnt = problems[l].obj_smooth.end_counter(i, cnt)
-
-        # Check stopping criterion
-        if gnorm <= gtol or snorm <= stol or i >= params['maxit']:
-            if i % params['outFreq'] != 0:
-                print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
-            if gnorm <= gtol:
-                flag = 0
-            elif i >= params['maxit']:
-                flag = 1
-            else:
-                flag = 2
-            break
-
-    cnt['iter'] = i
-    cnt['timetotal'] = time.time() - start_time
-
-    print("Optimization terminated because ", end="")
-    if flag == 0:
-        print("optimality tolerance was met")
-    elif flag == 1:
-        print("maximum number of iterations was met")
-    else:
-        print("step tolerance was met")
-    print(f"Total time: {cnt['timetotal']:8.6e} seconds")
-    cnt['iflag'] = flag
-    return x, cnt
-
-def compute_value(x, xprev, fvalprev, obj, pRed, params, cnt):
-    """
-    Compute the objective function value with inexactness handling.
-
-    Parameters:
-    x (np.array): Current point.
-    xprev (np.array): Previous point.
-    fvalprev (float): Previous function value.
-    obj (Objective): Objective function class.
-    pRed (float): Predicted reduction.
-    params (dict): Algorithm parameters.
-    cnt (dict): Counters.
-
-    Returns:
-    fval (float): Current function value.
-    fvalprev (float): Previous function value.
-    cnt (dict): Updated counters.
-    """
-    ftol = 1e-12
-    valerrprev = 0
-    if params['useInexactObj']:
-        omega = params['expValTol']
-        scale = params['scaleValTol']
-        force = params['forceValTol']
-        eta = params['etascale'] * min(params['eta1'], 1 - params['eta2'])
-        ftol = min(params['maxValTol'], scale * (eta * min(pRed, force ** cnt['nobj1'])) ** (1 / omega))
-        fvalprev, valerrprev = obj.value(xprev, ftol)
-        cnt['nobj1'] += 1
-
-    obj.update(x, 'trial')
-    fval, valerr = obj.value(x, ftol)
-    cnt['nobj1'] += 1
-    cnt['valerr'].append(max(valerr, valerrprev))
-    cnt['valtol'].append(ftol)
-
-    return fval, fvalprev, cnt
-
-def compute_gradient(x, problem, params, cnt):
-    """
-    Compute the gradient with inexactness handling.
-
-    Parameters:
-    x (np.array): Current point.
-    problem (Problem): Problem class.
-    params (dict): Algorithm parameters.
-    cnt (dict): Counters.
-
-    Returns:
-    grad (np.array): Gradient.
-    dgrad (np.array): Dual gradient.
-    gnorm (float): Gradient norm.
-    cnt (dict): Updated counters.
-    """
-    if params['useInexactGrad']:
-        scale0 = params['scaleGradTol']
-        gtol = min(params['maxGradTol'], scale0 * params['delta'])
-        gerr = gtol + 1
-        while gerr > gtol:
-            grad, gerr = problem.obj_smooth.gradient(x, gtol)
-            cnt['ngrad'] += 1
-            dgrad = problem.dvector.dual(grad)
-            pgrad = problem.obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale'])
-            cnt['nprox'] += 1
-            gnorm = problem.pvector.norm(pgrad - x) / params['ocScale']
-            gtol = min(params['maxGradTol'], scale0 * min(gnorm, params['delta']))
-    else:
-        gtol = 1e-12
-        grad, gerr = problem.obj_smooth.gradient(x, gtol)
-        cnt['ngrad'] += 1
-        dgrad = problem.dvector.dual(grad)
-        pgrad = problem.obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale'])
-        cnt['nprox'] += 1
-        gnorm = problem.pvector.norm(pgrad - x) / params['ocScale']
-
-    params['gradTol'] = gtol
-    cnt['graderr'].append(gerr)
-    cnt['gradtol'].append(gtol)
-
-    return grad, dgrad, gnorm, cnt
 
 def driver(savestats, name):
     print("driver started")
@@ -1210,68 +309,51 @@ def driver(savestats, name):
     alpha      = 1  # L2 penalty parameter
     beta       = 1e-4  # L1 penalty parameter
     derivCheck = False
-    
+
     meshlist = [NN_dim, int(NN_dim/2)]
-    #meshlist_single = [NN_dim]
-    
-    #meshlist = [NN_dim]
-    #meshlist = [NN_dim]
-    
+
     problems = [] #problem list goes from fine to coarse
-    x0 = []
-    problems_single = []
-    
-    #for i in range(0, len(meshlist_single)):
-        
-    #    if i < len(meshlist_single)-1:
-    #      R_single = restriction_R(meshlist_single[i+1], meshlist_single[i]) #puts R in preceeding problem
-    #    else:
-    #      R_single = torch.eye(meshlist_single[i])
-    #    nnset_single = NNSetup(meshlist_single[i], n, nu, alpha, beta, R_single, n_samples=1)
-    #    var_single   = nnset_single.returnVars(False)
-    #    p_single = Problem(var_single, R_single)
-    #    problems_single.append(p_single)
-    
-   
+    x0       = []
     for i in range(0, len(meshlist)):
-        
-        if i < len(meshlist)-1:
-          R = restriction_R(meshlist[i+1], meshlist[i]) #puts R in preceeding problem
-        else:
-          R = torch.eye(meshlist[i])
-        nnset = NNSetup(meshlist[i], n, nu, alpha, beta, R, n_samples=1)
+        nnset = NNSetup(meshlist[i], n, nu, alpha, beta, n_samples=1)
+        x     = TorchVect(nnset.NN.state_dict())
+        if i == 0:
+           x0 = x
         var   = nnset.returnVars(False)
+        if i < len(meshlist) - 1:
+          R = restriction_R(meshlist[i+1], meshlist[i], x) #puts R in preceeding problem
+        else:
+          R = Reye(x)
         p = Problem(var, R)
+        p.obj_smooth    = NNObjective(var)
+        p.obj_nonsmooth = L1TorchNorm(var)
+        p.pvector = L2TVPrimal(var)
+        p.dvector = L2TVDual(var)
         problems.append(p)
-        
 
-    if derivCheck:
-        for i in range(0, len(meshlist)):
-            x =  TorchVect(nnset.NN.state_dict())
-            d = x.clone() #just to get something to multiply against
-            for key, vals in d.td.items():
-                d.td[key] = vals.copy_(torch.randn(vals.size()))
-                deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
-                vector_check(x, d, problems[i])
+        if derivCheck:
+            for i in range(0, len(meshlist)):
+                x =  TorchVect(nnset.NN.state_dict())
+                d = x.clone() #just to get something to multiply against
+                for key, vals in d.td.items():
+                    d.td[key] = vals.copy_(torch.randn(vals.size()))
+                    deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
+                    vector_check(x, d, problems[i])
 
-    x0 =  TorchVect(NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1).NN.state_dict())
-    #x0_single = TorchVect(NNSetup(meshlist_single[0], n, nu, alpha, beta, R_single, n_samples=1).NN.state_dict())
     cnt = {}
-
     # Update default parameters
     params = set_default_parameters("SPG2")
     params["reltol"] = False
     params["t"] = 2 / alpha
     params["ocScale"] = 1 / alpha
-    
+
     #Plot loss
     #loss_values = []
-    
+
 
     # Solve optimization problem
     start_time   = time.time()
     x, cnt_tr    = trustregion(0, x0, params['delta'],problems, params)
-    #x_single,cnt_single = trustregion(0, x0_single, params['delta'],problems_single, params)
     loss_history = cnt_tr['objhist']
     #loss_history_single = cnt_single['objhist']
     iterations = range(1, len(loss_history) + 1)
@@ -1284,9 +366,9 @@ def driver(savestats, name):
     plt.title("Loss vs Iterations in Trust-Region Optimization")
     plt.grid(True)
     plt.show()
-    
-        
-        
+
+
+
     elapsed_time = time.time() - start_time
 
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
@@ -1314,16 +396,16 @@ def driver(savestats, name):
     #weights_fc1_after = state_dict_after['fc1.weight']
     #print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
 
-    
+
     final_nnset = NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1)
     final_nnset.NN.load_state_dict(x.td)
     final_nnset.NN.eval()
 
 
-    
+
     print("Updated neural network is stored in `updated_nn`.")
     final_nnset.plot_solutions()
-    
+
 
     return cnt
 
