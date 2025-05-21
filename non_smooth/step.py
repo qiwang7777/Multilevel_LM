@@ -15,12 +15,12 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
     dgrad                   = problems[l].dvector.dual(grad) #dual(grad) puts in primal space
     L                       = len(problems)
     pgrad                   = problems[l].obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale'])
+    cnt['nprox'] += 1
     ##Note: change Rdgnorm and gnorm to h_[i-1, 0] and h_[i,k]
     # gnorm                   = problems[l].pvector.norm(dgrad)
     R0 = problems[0].R
-    for i in range(1, l): #and adjust here for multilevel
+    for i in range(1, l+1): #and adjust here for multilevel
       R0 = problems[i].R @ R0
-    cnt['nprox'] += 1
     R = problems[l].R
     gnorm = problems[l].pvector.norm(pgrad - x) / params['ocScale']
     if l < L-2:
@@ -29,7 +29,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       Rgnorm = .1*gnorm
 
     #adjust here for multilevel
-    if (i > 0 and l < 1) and (Rgnorm > 0.01*gnorm and Rgnorm >= 1e-3): #note: counters are off
+    if (i > 0 and l < L-1) and (Rgnorm > 0.01*gnorm and Rgnorm >= 1e-3): #note: counters are off
       problemsL = [] #problem list goes from fine to coarse
       for i in range(0, L):
         if i == l+1:
@@ -67,6 +67,11 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       cnt    = problemsL[l+1].obj_nonsmooth.addCounter(cnt)
     else:
       R                       = Reye(x)
+      if x.shape[0] != R0.shape[0]: #check the dimension if only going up one level
+        R0 = problems[0].R
+        for i in range(1, l): #and adjust here for multilevel
+          R0 = problems[i].R @ R0
+
       problemTR               = Problem(problems[l].var, R)
       problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, grad = grad, x = x)
       problemTR.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l)
