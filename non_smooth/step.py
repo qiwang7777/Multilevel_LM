@@ -18,9 +18,8 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
     ##Note: change Rdgnorm and gnorm to h_[i-1, 0] and h_[i,k]
     # gnorm                   = problems[l].pvector.norm(dgrad)
     R0 = problems[0].R
-    for i in range(1, l):
+    for i in range(1, l): #and adjust here for multilevel
       R0 = problems[i].R @ R0
-
     cnt['nprox'] += 1
     R = problems[l].R
     gnorm = problems[l].pvector.norm(pgrad - x) / params['ocScale']
@@ -28,7 +27,9 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       Rgnorm = problems[l+1].pvector.norm(R @ (pgrad - x))
     else:
       Rgnorm = .1*gnorm
-    if i > 0 and (Rgnorm > 0.5*gnorm and Rgnorm >= 1e-3): #note: counters are off
+
+    #adjust here for multilevel
+    if (i > 0 and l < 1) and (Rgnorm > 0.01*gnorm and Rgnorm >= 1e-3): #note: counters are off
       problemsL = [] #problem list goes from fine to coarse
       for i in range(0, L):
         if i == l+1:
@@ -36,9 +37,6 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
           p               = Problem(problems[i].obj_nonsmooth.var, problems[i].R) #make next level problem
           p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = i, R = problems[i-1].R, grad = grad, x = x)
           p.obj_nonsmooth = phiPrec(problems[0], R = R0, l = i)
-          # d = np.random.randn(R.shape[0],)
-          # deriv_check(R @ x, d, p, 1e-4 * np.sqrt(np.finfo(float).eps))
-          # stp
           problemsL.append(p)
         else:
           problemsL.append(problems[i])
@@ -81,7 +79,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
 
 #Recursive step
 def Reye(x):
-    if x is np.ndarray:
+    if isinstance(x, np.ndarray):
       matrix_R = np.eye(x.shape[0])
     else:
       matrix_R = x.clone()

@@ -27,7 +27,7 @@ from non_smooth.L1norm import L1TorchNorm
 def restriction_R(m, n, x):
     matrix_R = x.clone()
     for k, v in matrix_R.td.items():
-      matrix_R.td[k] = torch.zeros(v.size(), dtype=torch.float64)
+      matrix_R.td[k] = torch.zeros((m, v.size()[0]), dtype=torch.float64)
       print(m,n,v.size())
       for i in range(m):
           matrix_R.td[k][i,2*(i+1)-1] = 1/np.sqrt(2)
