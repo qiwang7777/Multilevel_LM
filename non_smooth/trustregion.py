@@ -205,15 +205,17 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             cnt = problems[l].obj_smooth.end_counter(i, cnt)
 
         # Check stopping criterion
-        if gnorm <= gtol or snorm <= stol or i >= params['maxit']:
+        if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
             if i % params['outFreq'] != 0:
                 print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
             if gnorm <= gtol:
                 flag = 0
             elif i >= params['maxit']:
                 flag = 1
-            else:
+            elif problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
                 flag = 2
+            else:
+                flag = 3
             break
 
     cnt['iter'] = i
@@ -224,6 +226,8 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         print("optimality tolerance was met")
     elif flag == 1:
         print("maximum number of iterations was met")
+    elif flag == 2:
+        print("finer trust-region radius met")
     else:
         print("step tolerance was met")
     print(f"Total time: {cnt['timetotal']:8.6e} seconds")

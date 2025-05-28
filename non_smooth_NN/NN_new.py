@@ -22,16 +22,24 @@ from non_smooth.Problem import Problem
 from non_smooth.trustregion import trustregion
 from non_smooth.L1norm import L1TorchNorm
 
-
 # Restriction operator
 def restriction_R(m, n, x):
     matrix_R = x.clone()
+    j = 0
     for k, v in matrix_R.td.items():
-      matrix_R.td[k] = torch.zeros((m, v.size()[0]), dtype=torch.float64)
-      print(m,n,v.size())
-      for i in range(m):
-          matrix_R.td[k][i,2*(i+1)-1] = 1/np.sqrt(2)
-          matrix_R.td[k][i,2*i]       = 1/np.sqrt(2)
+      matrix_R.td[k] = [torch.zeros((m[j], n[j]), dtype=torch.float64), torch.eye(m[j+1], n[j+1], dtype=torch.float64)]
+      print(j, k, m[j], n[j], matrix_R.td[k][0].size(),  matrix_R.td[k][1].size(), x.td[k].size())
+      for i in range(m[j]):
+          matrix_R.td[k][0][i,2*(i+1)-1] = 1/np.sqrt(2)
+          matrix_R.td[k][0][i,2*i]       = 1/np.sqrt(2)
+
+      if m[j+1]!=n[j+1]:
+        for i in range(m[j+1]):
+            print(i)
+            matrix_R.td[k][1][i,2*(i+1)-1] = 1/np.sqrt(2)
+            matrix_R.td[k][1][i,2*i]       = 1/np.sqrt(2)
+
+      if j % 2 == 0 : j+=1
     return matrix_R
 
 #Recursive step
@@ -44,6 +52,8 @@ def Reye(x):
         matrix_R.td[k] = torch.eye(x.td[k].size()[0], dtype=torch.float64)
 
     return matrix_R
+
+
 class FullyConnectedNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(FullyConnectedNN, self).__init__()
@@ -113,7 +123,7 @@ class NNSetup:
     """
     Solve the NN control problem
     """
-    def __init__(self, NN_dim, n, mu, alpha, beta, n_samples = 1):
+    def __init__(self, NN_dim, n, alpha, beta, n_samples = 1):
         self.n      = n
         self.NN_dim = NN_dim
         self.nsamps = n_samples
@@ -136,12 +146,11 @@ class NNSetup:
 
         self.beta  = beta
         self.alpha = alpha
-        self.mu    = mu
         self.R     = []
 
 
 
-        self.NN    = FullyConnectedNN((n+1)**2, NN_dim, (n+1)**2)
+        self.NN    = FullyConnectedNN(NN_dim[0], NN_dim[1], NN_dim[2])
         self.NN.to(torch.float64)
 
         t = self.generate_fenics_data()
@@ -303,19 +312,18 @@ def driver(savestats, name):
     np.random.seed(0)
 
     # Set up optimization problem
-    n          = 3  # Number of cells
-    NN_dim     = 300 # Neural network nodes
-    nu         = 0.08  # Viscosity
+    n          = [30, 15]# Number of cells
+    NN_dim     = np.array([(n[0]+1)**2,100,(n[0]+1)**2]) # Neural network nodes
+    meshlist   = [NN_dim, np.array([(n[1]+1)**2, 100, (n[1]+1)**2])]
     alpha      = 1  # L2 penalty parameter
     beta       = 1e-4  # L1 penalty parameter
     derivCheck = False
 
-    meshlist = [NN_dim, int(NN_dim/2)]
 
     problems = [] #problem list goes from fine to coarse
     x0       = []
     for i in range(0, len(meshlist)):
-        nnset = NNSetup(meshlist[i], n, nu, alpha, beta, n_samples=1)
+        nnset = NNSetup(meshlist[i], n[i], alpha, beta, n_samples=1)
         x     = TorchVect(nnset.NN.state_dict())
         if i == 0:
            x0 = x

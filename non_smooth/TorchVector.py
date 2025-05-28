@@ -3,6 +3,10 @@ class TorchVect:
     @torch.no_grad()
     def __init__(self, tensordict): #store tensor dictionary
         self.td = tensordict
+        s = []
+        for _, v in self.td.items():
+            s.append(v.size()[0])
+        self.shape = s
     @torch.no_grad()
     def clone(self):
         td  = copy.deepcopy(self.td)
@@ -38,6 +42,7 @@ class TorchVect:
     def __matmul__(self, R):
         ans = self.clone()
         for k,v in self.td.items():
+            print(k, v.size(), R.td[k].size())
             ans.td[k] = R.td[k] @ v
             # if k == 'fc1.weight':
             #     ans.td[k] = R @ v
@@ -52,6 +57,7 @@ class TorchVect:
             # else:
             #     ans.td[k] = v
         return ans
+
     @torch.no_grad()
     def __truediv__(self, alpha):
         ans = self.clone()
