@@ -25,21 +25,27 @@ from non_smooth.L1norm import L1TorchNorm
 # Restriction operator
 def restriction_R(m, n, x):
     matrix_R = x.clone()
-    j = 0
+    j        = 0
+    J        = len(matrix_R.td.items())
     for k, v in matrix_R.td.items():
-      matrix_R.td[k] = [torch.zeros((m[j], n[j]), dtype=torch.float64), torch.eye(m[j+1], n[j+1], dtype=torch.float64)]
-      print(j, k, m[j], n[j], matrix_R.td[k][0].size(),  matrix_R.td[k][1].size(), x.td[k].size())
-      for i in range(m[j]):
-          matrix_R.td[k][0][i,2*(i+1)-1] = 1/np.sqrt(2)
-          matrix_R.td[k][0][i,2*i]       = 1/np.sqrt(2)
+      qm = int(np.sqrt(m[j % 2]) - 1)
+      qn = int(np.sqrt(n[j % 2]) - 1)
+      # print(j,k, m, n, q, qm, qn)
+      if j == 0 or j == J:
+        T  = torch.zeros((qm, qn), dtype=torch.float64) #maps fine to course
+        for i in range(qm):
+          T[i,2*i+1] = 1/np.sqrt(2)
+          T[i,2*i]   = 1/np.sqrt(2)
+        RL = torch.kron(T, T)
+      else:
+        RL = torch.eye(m[(j+1) % 2], n[(j+1) % 2], dtype=torch.float64)
 
-      if m[j+1]!=n[j+1]:
-        for i in range(m[j+1]):
-            print(i)
-            matrix_R.td[k][1][i,2*(i+1)-1] = 1/np.sqrt(2)
-            matrix_R.td[k][1][i,2*i]       = 1/np.sqrt(2)
+      RR = torch.eye(m[(j+1) % 2], n[(j+1) % 2], dtype=torch.float64) #don't change inner
+      matrix_R.td[k] = [RL, RR]
 
-      if j % 2 == 0 : j+=1
+      # print(matrix_R.td[k][0].size(),  matrix_R.td[k][1].size(), x.td[k].size())
+
+      j+=1
     return matrix_R
 
 #Recursive step
@@ -49,8 +55,15 @@ def Reye(x):
     else:
       matrix_R = x.clone()
       for k, v in matrix_R.td.items():
-        matrix_R.td[k] = torch.eye(x.td[k].size()[0], dtype=torch.float64)
+        n = x.td[k].size()[0]
+        if len(x.td[k].size()) == 1:
+          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
+                            torch.eye(n, n, dtype=torch.float64)]
+        else:
+          m = x.td[k].size()[1]
 
+          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
+                            torch.eye(m, m, dtype=torch.float64)]
     return matrix_R
 
 
@@ -315,6 +328,7 @@ def driver(savestats, name):
     n          = [30, 15]# Number of cells
     NN_dim     = np.array([(n[0]+1)**2,100,(n[0]+1)**2]) # Neural network nodes
     meshlist   = [NN_dim, np.array([(n[1]+1)**2, 100, (n[1]+1)**2])]
+
     alpha      = 1  # L2 penalty parameter
     beta       = 1e-4  # L1 penalty parameter
     derivCheck = False
@@ -357,7 +371,6 @@ def driver(savestats, name):
 
     #Plot loss
     #loss_values = []
-
 
     # Solve optimization problem
     start_time   = time.time()

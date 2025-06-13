@@ -39,23 +39,12 @@ class TorchVect:
     def __rmul__(self, alpha):
         return self.__mul__(alpha)
     @torch.no_grad()
-    def __matmul__(self, R):
-        ans = self.clone()
-        for k,v in self.td.items():
-            print(k, v.size(), R.td[k].size())
-            ans.td[k] = R.td[k] @ v
-            # if k == 'fc1.weight':
-            #     ans.td[k] = R @ v
-            # elif k == 'fc1.bias':
-            #     ans.td[k] = R @ v
-            # elif k =='fc2.weight':
-            #     ans.td[k] = R @ v @ R.T
-            # elif k =='fc2.bias':
-            #     ans.td[k] = R @ v
-            # elif k == 'fc3.weight':
-            #     ans.td[k] = v @ R.T
-            # else:
-            #     ans.td[k] = v
+    def __matmul__(self, x):
+        ans = x.clone()
+        for k,v in x.td.items():
+            print(k, v, self.td[k][0].size(), self.td[k][1].size())
+            ans.td[k] = self.td[k][1] @ v @ self.td[k][0].T
+
         return ans
 
     @torch.no_grad()

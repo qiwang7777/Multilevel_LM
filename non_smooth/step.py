@@ -89,6 +89,14 @@ def Reye(x):
     else:
       matrix_R = x.clone()
       for k, v in matrix_R.td.items():
-        matrix_R.td[k] = torch.eye(x.td[k].size()[0], dtype=torch.float64)
+        n = x.td[k].size()[0]
+        if len(x.td[k].size()) == 1:
+          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
+                            torch.eye(n, n, dtype=torch.float64)]
+        else:
+          m = x.td[k].size()[1]
+
+          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
+                            torch.eye(m, m, dtype=torch.float64)]
 
     return matrix_R
