@@ -16,6 +16,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
     L                       = len(problems)
     pgrad                   = problems[l].obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale'])
     cnt['nprox'] += 1
+    debugflag = 'R-step'
     ##Note: change Rdgnorm and gnorm to h_[i-1, 0] and h_[i,k]
     # gnorm                   = problems[l].pvector.norm(dgrad)
     R0 = problems[0].R
@@ -37,6 +38,8 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
           p               = Problem(problems[i].obj_nonsmooth.var, problems[i].R) #make next level problem
           p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = i, R = problems[i-1].R, grad = grad, x = x)
           p.obj_nonsmooth = phiPrec(problems[0], R = R0, l = i)
+          p.pvector       = problems[i].pvector
+          p.dvector       = problems[i].dvector
           problemsL.append(p)
         else:
           problemsL.append(problems[i])
@@ -67,6 +70,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       cnt    = problemsL[l+1].obj_nonsmooth.addCounter(cnt)
     else:
       R                       = Reye(x)
+      debugflag = 'SPG step'
       if x.shape[0] != R0.shape[0]: #check the dimension if only going up one level
         R0 = problems[0].R
         for i in range(1, l): #and adjust here for multilevel
@@ -75,28 +79,27 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       problemTR               = Problem(problems[l].var, R)
       problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, grad = grad, x = x)
       problemTR.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l)
+      problemTR.pvector       = problems[l].pvector
+      problemTR.dvector       = problems[l].dvector
       # d = np.random.randn((x.shape[0]))
       # deriv_check(x, d, problemTR, 1e-4 * np.sqrt(np.finfo(float).eps))
       s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(x, val, dgrad, phi, problemTR, params, cnt)
       cnt = problemTR.obj_smooth.addCounter(cnt)
       cnt = problemTR.obj_nonsmooth.addCounter(cnt)
+    print(debugflag, pRed)
     return s, snorm, pRed, phinew, iflag, iter, cnt, params
 
 #Recursive step
 def Reye(x):
-    if isinstance(x, np.ndarray):
+    if isinstance(x,np.ndarray):
       matrix_R = np.eye(x.shape[0])
     else:
       matrix_R = x.clone()
       for k, v in matrix_R.td.items():
         n = x.td[k].size()[0]
         if len(x.td[k].size()) == 1:
-          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
-                            torch.eye(n, n, dtype=torch.float64)]
+          matrix_R.td[k] = torch.eye(n, n, dtype=torch.float64)
         else:
           m = x.td[k].size()[1]
-
-          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
-                            torch.eye(m, m, dtype=torch.float64)]
-
+          matrix_R.td[k] = torch.eye(m, m, dtype=torch.float64)
     return matrix_R

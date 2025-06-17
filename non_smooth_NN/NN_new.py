@@ -25,27 +25,31 @@ from non_smooth.L1norm import L1TorchNorm
 # Restriction operator
 def restriction_R(m, n, x):
     matrix_R = x.clone()
-    j        = 0
-    J        = len(matrix_R.td.items())
-    for k, v in matrix_R.td.items():
-      qm = int(np.sqrt(m[j % 2]) - 1)
-      qn = int(np.sqrt(n[j % 2]) - 1)
-      # print(j,k, m, n, q, qm, qn)
-      if j == 0 or j == J:
+    matrix_R.isRop = True
+    I = list(matrix_R.td.items())
+    J = len(I)
+    for j, (k, _) in enumerate(I):
+      qm  = int(np.sqrt(m[j]))
+      qn  = int(np.sqrt(n[j]))
+      # print(j, k, m[j], n[j], qm, qn, x.td[k].size())
+      if qm == qn:
+        R  = torch.eye(m[j], n[j], dtype=torch.float64)
+      else:
         T  = torch.zeros((qm, qn), dtype=torch.float64) #maps fine to course
         for i in range(qm):
-          T[i,2*i+1] = 1/np.sqrt(2)
-          T[i,2*i]   = 1/np.sqrt(2)
-        RL = torch.kron(T, T)
-      else:
-        RL = torch.eye(m[(j+1) % 2], n[(j+1) % 2], dtype=torch.float64)
+          if not (qn % 2 != 0 and i == qm-1):
+            T[i,2*i+1] = 1/np.sqrt(2)
+            T[i,2*i]   = 1/np.sqrt(2)
+          else:
+            T[i,2*i]   = 1
+        if j == J - 1:
+          R = torch.kron(T, T)
+        else:
+          R = torch.kron(T, T).T
+      matrix_R.td[k] = R
 
-      RR = torch.eye(m[(j+1) % 2], n[(j+1) % 2], dtype=torch.float64) #don't change inner
-      matrix_R.td[k] = [RL, RR]
+      # print(j, k, matrix_R.td[k].size())
 
-      # print(matrix_R.td[k][0].size(),  matrix_R.td[k][1].size(), x.td[k].size())
-
-      j+=1
     return matrix_R
 
 #Recursive step
@@ -53,29 +57,26 @@ def Reye(x):
     if x is np.ndarray:
       matrix_R = np.eye(x.shape[0])
     else:
-      matrix_R = x.clone()
+      matrix_R       = x.clone()
+      matrix_R.isRop = True
       for k, v in matrix_R.td.items():
         n = x.td[k].size()[0]
         if len(x.td[k].size()) == 1:
-          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
-                            torch.eye(n, n, dtype=torch.float64)]
+          matrix_R.td[k] = torch.eye(n, n, dtype=torch.float64)
+
         else:
           m = x.td[k].size()[1]
+          matrix_R.td[k] = torch.eye(m, m, dtype=torch.float64)
 
-          matrix_R.td[k] = [torch.eye(n, n, dtype=torch.float64),
-                            torch.eye(m, m, dtype=torch.float64)]
     return matrix_R
 
 
 class FullyConnectedNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, dims):
         super(FullyConnectedNN, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.fc1 = nn.Linear(dims[0], dims[1])
+        self.fc2 = nn.Linear(dims[2], dims[3])
+        self.fc3 = nn.Linear(dims[4], dims[5])
         self.activation = nn.Sigmoid() #changable
 
     def forward(self, x):
@@ -163,7 +164,7 @@ class NNSetup:
 
 
 
-        self.NN    = FullyConnectedNN(NN_dim[0], NN_dim[1], NN_dim[2])
+        self.NN    = FullyConnectedNN(NN_dim)
         self.NN.to(torch.float64)
 
         t = self.generate_fenics_data()
@@ -325,9 +326,11 @@ def driver(savestats, name):
     np.random.seed(0)
 
     # Set up optimization problem
-    n          = [30, 15]# Number of cells
-    NN_dim     = np.array([(n[0]+1)**2,100,(n[0]+1)**2]) # Neural network nodes
-    meshlist   = [NN_dim, np.array([(n[1]+1)**2, 100, (n[1]+1)**2])]
+    n          = [30, 30] #[30, 15]# Number of cells
+    NN_dim     = np.array([(n[0]+1)**2, 100, 100, 100, 100, (n[0]+1)**2]) # Neural network nodes
+    meshlist   = [NN_dim, np.array([(n[1]+1)**2, 100, 100, 100, 100, (n[1]+1)**2])]
+    # meshlist   = [NN_dim, np.array([(n[0]+1)**2, 49, 49, 25, 25, (n[0]+1)**2])]
+
 
     alpha      = 1  # L2 penalty parameter
     beta       = 1e-4  # L1 penalty parameter
@@ -368,6 +371,7 @@ def driver(savestats, name):
     params["reltol"] = False
     params["t"] = 2 / alpha
     params["ocScale"] = 1 / alpha
+    params['maxit'] = 300
 
     #Plot loss
     #loss_values = []
@@ -417,8 +421,7 @@ def driver(savestats, name):
     #weights_fc1_after = state_dict_after['fc1.weight']
     #print("Weights of fc1 after optimization:", torch.nonzero(weights_fc1_after))
 
-
-    final_nnset = NNSetup(meshlist[0], n, nu, alpha, beta, R, n_samples=1)
+    final_nnset = NNSetup(meshlist[0], n[0], alpha, beta, n_samples=1)
     final_nnset.NN.load_state_dict(x.td)
     final_nnset.NN.eval()
 
