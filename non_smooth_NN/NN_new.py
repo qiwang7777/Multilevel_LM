@@ -23,35 +23,55 @@ from non_smooth.trustregion import trustregion
 from non_smooth.L1norm import L1TorchNorm
 
 # Restriction operator
-def restriction_R(m, n, x):
+#def restriction_R(m, n, x):
+#    matrix_R = x.clone()
+#    matrix_R.isRop = True
+#    I = list(matrix_R.td.items())
+#    J = len(I)
+#    for j, (k, _) in enumerate(I):
+#      qm  = int(np.sqrt(m[j]))
+#      qn  = int(np.sqrt(n[j]))
+#      # print(j, k, m[j], n[j], qm, qn, x.td[k].size())
+#      if qm == qn:
+#        R  = torch.eye(m[j], n[j], dtype=torch.float64)
+#      else:
+#        T  = torch.zeros((qm, qn), dtype=torch.float64) #maps fine to course
+#        for i in range(qm):
+#          if not (qn % 2 != 0 and i == qm-1):
+#            T[i,2*i+1] = 1/np.sqrt(2)
+#            T[i,2*i]   = 1/np.sqrt(2)
+#          else:
+#            T[i,2*i]   = 1
+#        if j == J - 1:
+#          R = torch.kron(T, T)
+#        else:
+#          R = torch.kron(T, T).T
+#      matrix_R.td[k] = R
+
+#      # print(j, k, matrix_R.td[k].size())
+
+#    return matrix_R
+
+def restriction_R(m,n,x):
     matrix_R = x.clone()
     matrix_R.isRop = True
     I = list(matrix_R.td.items())
     J = len(I)
-    for j, (k, _) in enumerate(I):
-      qm  = int(np.sqrt(m[j]))
-      qn  = int(np.sqrt(n[j]))
-      # print(j, k, m[j], n[j], qm, qn, x.td[k].size())
-      if qm == qn:
-        R  = torch.eye(m[j], n[j], dtype=torch.float64)
-      else:
-        T  = torch.zeros((qm, qn), dtype=torch.float64) #maps fine to course
-        for i in range(qm):
-          if not (qn % 2 != 0 and i == qm-1):
-            T[i,2*i+1] = 1/np.sqrt(2)
-            T[i,2*i]   = 1/np.sqrt(2)
-          else:
-            T[i,2*i]   = 1
-        if j == J - 1:
-          R = torch.kron(T, T)
+    for j,(k,_) in enumerate(I):
+        #qm = int(np.sqrt(m[j]))
+        #qn = int(np.sqrt(n[j]))
+        if m[j]==n[j]:
+            R = torch.eye(m[j],n[j],dtype = torch.float64)
         else:
-          R = torch.kron(T, T).T
-      matrix_R.td[k] = R
-
-      # print(j, k, matrix_R.td[k].size())
-
+            R = torch.zeros(m[j],n[j],dtype = torch.float64)
+            for i in range(m[j]):
+                R[i,2*(i+1)-1] = 1/np.sqrt(2)
+                R[i,2*i] = 1/np.sqrt(2)
+                
+        matrix_R.td[k] = R
+    
     return matrix_R
-
+    
 #Recursive step
 def Reye(x):
     if x is np.ndarray:
@@ -328,7 +348,7 @@ def driver(savestats, name):
     # Set up optimization problem
     n          = [30, 30] #[30, 15]# Number of cells
     NN_dim     = np.array([(n[0]+1)**2, 100, 100, 100, 100, (n[0]+1)**2]) # Neural network nodes
-    meshlist   = [NN_dim, np.array([(n[1]+1)**2, 100, 100, 100, 100, (n[1]+1)**2])]
+    meshlist   = [NN_dim, np.array([(n[1]+1)**2, 50, 50, 50, 50, (n[1]+1)**2])]
     # meshlist   = [NN_dim, np.array([(n[0]+1)**2, 49, 49, 25, 25, (n[0]+1)**2])]
 
 
