@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+#L2TVprimal for NN
 class L2TVPrimal:
     def __init__(self, var):
         self.var = var
@@ -18,7 +19,7 @@ class L2TVPrimal:
     @torch.no_grad()
     def dual(self, x):
         return x
-
+#L2TVDual for NN
 class L2TVDual:
     def __init__(self, var):
         self.var = var
