@@ -1,6 +1,6 @@
 
 import numpy as np
-import time
+import time, copy
 from .step import trustregion_step
 
 def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
@@ -89,7 +89,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         x = problems[l].obj_nonsmooth.prox(x0, 1)
         cnt['nprox'] += 1
     else:
-        x = x0
+        x = copy.deepcopy(x0)
 
     problems[l].obj_smooth.update(x, 'init')
     ftol = 1e-12
@@ -101,7 +101,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     cnt['nobj1'] += 1
 
     grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-    phi = problems[l].obj_nonsmooth.value(x)
+    phi                 = problems[l].obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
 
     if hasattr(problems[l].obj_smooth, 'end_counter'):
@@ -311,5 +311,4 @@ def compute_gradient(x, problem, params, cnt):
     params['gradTol'] = gtol
     cnt['graderr'].append(gerr)
     cnt['gradtol'].append(gtol)
-
     return grad, dgrad, gnorm, cnt

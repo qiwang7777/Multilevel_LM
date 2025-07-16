@@ -7,16 +7,16 @@ class modelTR:
         self.l       = l
         self.x       = R @ x
         self.R       = R
-        self.Rgrad   = problems[l].dvector.dual(R @ grad) #should be in dual space, dgrad in primal
+        # self.Rgrad   = problems[l].dvector.dual(R @ grad) #should be in dual space, dgrad in primal
+        self.Rgrad   = problems[l].dvector.dual(grad)
         self.subtype = subtype
         self.nobj1   = 0
         self.ngrad   = 0
         self.nhess   = 0
         if subtype == 'recursive':
-            grad, _      = problems[l].obj_smooth.gradient(self.x, 0.)
-            self.grad    = problems[l].dvector.dual(grad)
+            grad, _      = self.problem.obj_smooth.gradient(self.x, 0.)
+            self.grad    = self.problem.dvector.dual(grad)
             self.ngrad  += 1
-
     def update(self, x, type):
         self.problem.obj_smooth.update(x, type)
     def value(self, x, ftol):
@@ -31,8 +31,9 @@ class modelTR:
       grad, gerr      = self.problem.obj_smooth.gradient(x, gtol)
       if self.subtype == 'recursive':
         grad        += self.problem.pvector.dual(self.Rgrad - self.grad)
+        print(np.linalg.norm(self.Rgrad - self.grad))
         # grad        += self.Rgrad
-        self.ngrad += 0
+        self.ngrad  += 0
       return grad, gerr
     def hessVec(self,v,x,htol):
       if (self.secant):

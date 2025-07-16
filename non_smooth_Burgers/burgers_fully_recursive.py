@@ -534,14 +534,14 @@ def driver(savestats, name):
     np.random.seed(0)
 
     # Set up optimization problem
-    n = 1024  # Number of cells
+    n = 1024 #4096  # Number of cells
     mu = 0.08  # Viscosity
     alpha = 1e-4  # L2 penalty parameter
     beta = 1e-2  # L1 penalty parameter
     usepc = True  # Use piecewise constant controls
     useInexact = False
     derivCheck = False
-    meshlist = [n, int(n/2), int(n/4)]
+    meshlist = [n, int(n/2)] #, int(n/4)]
     problems = [] #problem list goes from fine to coarse
     for i in range(0, len(meshlist)):
         B   = BurgersSetup(meshlist[i], mu=mu, alpha=alpha, beta=beta)
