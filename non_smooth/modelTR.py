@@ -1,6 +1,6 @@
 import numpy as np
 class modelTR:
-    def __init__(self, problems, secant, subtype = 'spg', l = 0, R = np.empty(1), grad = np.empty(1), x = np.empty(1)):
+    def __init__(self, problems, secant, subtype = 'spg', l = 0, R = np.empty(1), dgrad = np.empty(1), x = np.empty(1)):
         self.problem = problems[l]
         self.var     = problems[l].var
         self.secant  = secant
@@ -8,7 +8,7 @@ class modelTR:
         self.x       = R @ x
         self.R       = R
         # self.Rgrad   = problems[l].dvector.dual(R @ grad) #should be in dual space, dgrad in primal
-        self.Rgrad   = problems[l].dvector.dual(grad)
+        self.Rgrad   = dgrad
         self.subtype = subtype
         self.nobj1   = 0
         self.ngrad   = 0

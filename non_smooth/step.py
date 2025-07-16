@@ -35,7 +35,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
       # constructs L_{i-1} = f_{i-1} + (Rg_{i,k} - g_{i-1,0})'*(x - x_{i-1,0})
       print('up top', val)
       p               = Problem(problems[l+1].obj_nonsmooth.var, problems[l+1].R) #make next level problem
-      p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = l+1, R = problems[l].R, grad = R @ grad, x = x)
+      p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = l+1, R = problems[l].R, dgrad = R @ dgrad, x = x)
       p.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l+1)
       p.pvector       = problems[l+1].pvector
       p.dvector       = problems[l+1].dvector
@@ -80,7 +80,7 @@ def trustregion_step(l,x,val,grad,phi,problems,params,cnt, i=0):
           R0 = problems[i].R @ R0
 
       problemTR               = Problem(problems[l].var, R)
-      problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, grad = grad, x = x)
+      problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, dgrad = dgrad, x = x)
       problemTR.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l)
       problemTR.pvector       = problems[l].pvector
       problemTR.dvector       = problems[l].dvector
