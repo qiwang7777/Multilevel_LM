@@ -15,7 +15,7 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
   if (gHg > params['safeguard'] * gg):
     t0Tmp = gg / gHg
   else:
-    t0Tmp = params.t / np.sqrt(gg)
+    t0Tmp = params['t'] / np.sqrt(gg)
 
   t0     = np.min([params['lam_max'],np.max([params['lam_min'], t0Tmp])])
   xc     = problem.obj_nonsmooth.prox(x - t0 * dgrad, t0)

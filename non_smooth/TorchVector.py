@@ -53,7 +53,8 @@ class TorchVect:
         ans = x.clone()
         I = list(x.td.items())
         for index, (k, v) in enumerate(I):
-            # print(index, k, self.td[k].size(), v.size())
+            import pdb
+            pdb.set_trace()
             if index % 2 == 0 and not x.isRop:
               nk = I[index+1][0]
               # print(nk, self.td[nk].size())

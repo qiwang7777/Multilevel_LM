@@ -525,7 +525,7 @@ def restriction_R(m,n):
     matrix_R = np.zeros((m,n))
     for i in range(m):
         matrix_R[i,2*(i+1)-1] = 1/np.sqrt(2)
-        matrix_R[i,2*i] = 1/np.sqrt(2)
+        matrix_R[i,2*i]       = 1/np.sqrt(2)
     return matrix_R
 
 
@@ -534,18 +534,18 @@ def driver(savestats, name):
     np.random.seed(0)
 
     # Set up optimization problem
-    n = 1024 #4096  # Number of cells
-    mu = 0.08  # Viscosity
-    alpha = 1e-4  # L2 penalty parameter
-    beta = 1e-2  # L1 penalty parameter
-    usepc = True  # Use piecewise constant controls
+    n          = 1024 # Number of cells
+    mu         = 0.06  # Viscosity
+    alpha      = 1e-4  # L2 penalty parameter
+    beta       = 1e-2  # L1 penalty parameter
+    usepc      = True  # Use piecewise constant controls
     useInexact = False
     derivCheck = False
-    meshlist = [n, int(n/2)] #, int(n/4)]
-    problems = [] #problem list goes from fine to coarse
+    meshlist   = [n, int(n/2), int(n/4)] #, int(n/8), int(n/16)]
+    problems   = [] #problem list goes from fine to coarse
     for i in range(0, len(meshlist)):
         B   = BurgersSetup(meshlist[i], mu=mu, alpha=alpha, beta=beta)
-        var = B.returnVars(False)
+        var = B.returnVars(True)
         if i < len(meshlist)-1:
           R = restriction_R(meshlist[i+1], meshlist[i]) #puts R in preceeding problem
         else:
@@ -559,17 +559,6 @@ def driver(savestats, name):
     z = np.random.rand(n)
     u = np.zeros(n-1)
     x = np.hstack([u, z])
-
-    # Parameters for the trust-region solver
-    params = {
-        'maxitsp': 10,
-        'lam_min': 1e-12,
-        'lam_max': 1e12,
-        't': 1,
-        'gtol': np.sqrt(np.finfo(float).eps),
-        'delta': 1.0  # Trust-region radius
-    }
-
 
     dim = n if usepc else n + 1
 
@@ -587,19 +576,17 @@ def driver(savestats, name):
     cnt = {}
 
     # Update default parameters
-    params = set_default_parameters("SPG2")
-    params["reltol"] = False
-    params["t"] = 2 / alpha
+    params            = set_default_parameters("SPG2")
+    params["reltol"]  = False
+    params["t"]       = 2 / alpha
     params["ocScale"] = 1 / alpha
+    params["gtol"]    = 1e-7
 
     # Solve optimization problem
     start_time = time.time()
     for p in problems:
       p.obj_smooth.reset()
       p.obj_smooth.con0.reset()
-
-
-
 
     x, cnt_tr = trustregion(0, x0, params['delta'],problems, params)
 
@@ -614,16 +601,16 @@ def driver(savestats, name):
 
     cnt = (cnt_tr, pro_tr)
 
-    print("\nSummary")
-    print(
-        "           niter     nobjs     ngrad     nhess     nobjn     nprox     nstat     nadjo     nssen     nasen"
-    )
+    # print("\nSummary")
+    # print(
+    #     "           niter     nobjs     ngrad     nhess     nobjn     nprox     nstat     nadjo     nssen     nasen"
+    # )
 
-    print(
-        f"   SGP2:  {cnt[0]['iter']:6d}    {cnt[0]['nobj1']:6d}    {cnt[0]['ngrad']:6d}    {cnt[0]['nhess']:6d}    "
-        f"{cnt[0]['nobj2']:6d}    {cnt[0]['nprox']:6d}    {cnt[1][1]['nstate']:6d}    {cnt[1][1]['nadjoint']:6d}    "
-        f"{cnt[1][1]['nstatesens']:6d}    {cnt[1][1]['nadjointsens']:6d}"
-    )
+    # print(
+    #     f"   SGP2:  {cnt[0]['iter']:6d}    {cnt[0]['nobj1']:6d}    {cnt[0]['ngrad']:6d}    {cnt[0]['nhess']:6d}    "
+    #     f"{cnt[0]['nobj2']:6d}    {cnt[0]['nprox']:6d}    {cnt[1][1]['nstate']:6d}    {cnt[1][1]['nadjoint']:6d}    "
+    #     f"{cnt[1][1]['nstatesens']:6d}    {cnt[1][1]['nadjointsens']:6d}"
+    # )
     var = problems[0].obj_nonsmooth.var
     mesh = 0.5 * (var['mesh'][:-1] + var['mesh'][1:]) if usepc else var['mesh']
 

@@ -98,5 +98,5 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     pRed = (val+phi) - (valnew+phinew)
     if (iter0 > iter):
        iter = iter0
-    print(snorm, pRed)
+    # print(snorm, pRed)
     return s, snorm, pRed, phinew, iflag, iter, cnt, params

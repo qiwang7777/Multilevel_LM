@@ -74,7 +74,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         'ngradhist': [],
         'nhesshist': [],
         'nproxhist': [],
-        'timestor': [],
+        'timehist': [],
         'valerr': [],
         'valtol': [],
         'graderr': [],
@@ -95,11 +95,8 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     ftol = 1e-12
     if params['useInexactObj']:
         ftol = params['maxValTol']
-    params['delta'] = min(params['delta'], Deltai)
     val, _      = problems[l].obj_smooth.value(x, ftol)
-
     cnt['nobj1'] += 1
-
     grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
     phi                 = problems[l].obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
@@ -107,9 +104,9 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     if hasattr(problems[l].obj_smooth, 'end_counter'):
         cnt = problems[l].obj_smooth.end_counter(0, cnt)
 
-    if params['useSecantPrecond']:
-        problems[l].prec.apply         = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
-        problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
+    # if params['useSecantPrecond']:
+        # problems[l].prec.apply         = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
+        # problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
 
     # Output header
     if l == 0:
@@ -129,7 +126,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     cnt['ngradhist'].append(cnt['ngrad'])
     cnt['nhesshist'].append(cnt['nhess'])
     cnt['nproxhist'].append(cnt['nprox'])
-    cnt['timestor'].append(np.nan)
+    cnt['timehist'].append(np.nan)
 
     # Set optimality tolerance
     gtol = params['gtol']
@@ -150,11 +147,11 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             cnt = problems[l].obj_smooth.begin_counter(i, cnt)
 
         # Solve trust-region subproblem
-        params['tolsp'] = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
+        params['tolsp']                                        = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
         s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, phi, problems, params, cnt, i=i-1)
 
         # Update function information
-        xnew = x + s
+        xnew             = x + s
         problems[l].obj_smooth.update(xnew, 'trial')
         valnew, val, cnt = compute_value(xnew, x, val, problems[l].obj_smooth, pRed, params, cnt)
 
@@ -164,25 +161,26 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             params['delta'] = params['gamma1'] * min(snorm, params['delta'])
             problems[l].obj_smooth.update(x, 'reject')
             if params['useInexactGrad']:
-                grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
+                grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
         else:
-            x = xnew
+            x   = xnew
             val = valnew
             phi = phinew
             problems[l].obj_smooth.update(x, 'accept')
-            grad0 = grad
-            grad, dgrad, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
+            # grad0 = grad
+            grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
             if aRed > params['eta2'] * pRed:
                 params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
             # Update secant
-            if params['useSecant'] or params['useSecantPrecond']:
-                y = grad - grad0
-                problems.secant.update(s, y, problems[l].pvector, problems[l].dvector)
-                if params['useSecantPrecond']:
-                    problems[l].prec.apply = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
-                    problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
+            # if params['useSecant'] or params['useSecantPrecond']:
+                # y = grad - grad0
+                # problems.secant.update(s, y, problems[l].pvector, problems[l].dvector)
+                # if params['useSecantPrecond']:
+                    # problems[l].prec.apply = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
+                    # problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
+        if l != 0:
+          params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
 
-        params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
         # Output iteration history
         if i % params['outFreq'] == 0:
             print(f"{l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
@@ -199,13 +197,13 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         cnt['ngradhist'].append(cnt['ngrad'])
         cnt['nhesshist'].append(cnt['nhess'])
         cnt['nproxhist'].append(cnt['nprox'])
-        cnt['timestor'].append(time.time() - start_time)
+        cnt['timehist'].append(time.time() - start_time)
 
         if hasattr(problems[l].obj_smooth, 'end_counter'):
             cnt = problems[l].obj_smooth.end_counter(i, cnt)
 
         # Check stopping criterion
-        if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
+        if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or (problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai and l!=0):
             if i % params['outFreq'] != 0:
                 print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
             if gnorm <= gtol:
