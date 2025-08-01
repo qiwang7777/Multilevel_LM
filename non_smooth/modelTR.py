@@ -16,6 +16,7 @@ class modelTR:
         self.ngrad    = 0
         self.nhess    = 0
         if subtype == 'recursive': #store grad at x
+            self.problem.obj_smooth.update(self.x, 'init')
             self.grad, _      = self.problem.obj_smooth.gradient(self.x, 0.)
             self.dgrad        = self.problem.dvector.dual(self.grad)
             self.ngrad       += 1
@@ -31,6 +32,8 @@ class modelTR:
     def gradient(self,x,gtol):
       grad, gerr      = self.problem.obj_smooth.gradient(x, gtol)
       if self.subtype == 'recursive':
+        # import pdb
+        # pdb.set_trace()
         grad        += self.Rgrad - self.grad
         self.ngrad  += 0
       return grad, gerr

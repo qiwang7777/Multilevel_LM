@@ -541,7 +541,7 @@ def driver(savestats, name):
     usepc      = True  # Use piecewise constant controls
     useInexact = False
     derivCheck = False
-    meshlist   = [n, int(n/2), int(n/4)] #, int(n/8), int(n/16)]
+    meshlist   = [n, int(n/2), int(n/4)]#, int(n/8)]#, int(n/16)]
     problems   = [] #problem list goes from fine to coarse
     for i in range(0, len(meshlist)):
         B   = BurgersSetup(meshlist[i], mu=mu, alpha=alpha, beta=beta)
@@ -556,7 +556,7 @@ def driver(savestats, name):
         problems.append(p)
 
 
-    z = np.random.rand(n)
+    z = np.ones(n)
     u = np.zeros(n-1)
     x = np.hstack([u, z])
 
@@ -572,7 +572,7 @@ def driver(savestats, name):
           deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
           vector_check(x, d, problems[i])
 
-    x0 = np.ones(dim)
+    x0  = np.ones(dim)
     cnt = {}
 
     # Update default parameters
@@ -580,7 +580,7 @@ def driver(savestats, name):
     params["reltol"]  = False
     params["t"]       = 2 / alpha
     params["ocScale"] = 1 / alpha
-    params["gtol"]    = 1e-7
+    params["gtol"]    = 1e-6
 
     # Solve optimization problem
     start_time = time.time()

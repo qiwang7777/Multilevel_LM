@@ -22,7 +22,7 @@ def set_default_parameters(name):
     params['eta2']     = 0.9
     params['gamma1']   = 0.25
     params['gamma2']   = 2.5
-    params['delta']    = 50.0
+    params['delta']    = 1.e2
     params['deltamax'] = 1e10
 
     # Subproblem solve tolerances
@@ -49,7 +49,7 @@ def set_default_parameters(name):
 
     # Recursive Parameters
     params['RgnormScale']      = 1e-1 # is v in Rgnorm >= v*gnorm -> relative R-step flag
-    params['RgnormScaleTol']   = 1e1 #is v in Rgnorm >= v^i*gtol -> absolute R-step flag
+    params['RgnormScaleTol']   = 5e2  # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
 
 
 

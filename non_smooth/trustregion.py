@@ -90,12 +90,13 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         cnt['nprox'] += 1
     else:
         x = copy.deepcopy(x0)
-
-    problems[l].obj_smooth.update(x, 'init')
+    if l == 0:
+      problems[l].obj_smooth.update(x, 'init')
     ftol = 1e-12
     if params['useInexactObj']:
         ftol = params['maxValTol']
     val, _      = problems[l].obj_smooth.value(x, ftol)
+
     cnt['nobj1'] += 1
     grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
     phi                 = problems[l].obj_nonsmooth.value(x)
@@ -228,7 +229,8 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         print("finer trust-region radius met")
     else:
         print("step tolerance was met")
-    print(f"Total time: {cnt['timetotal']:8.6e} seconds")
+    if l==0:
+      print(f"Total time: {cnt['timetotal']:8.6e} seconds")
     cnt['iflag'] = flag
     return x, cnt
 
