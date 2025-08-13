@@ -494,40 +494,57 @@ class NNObjective:
     #        return TorchVect(Hv[0] if Hv[0] is not None else torch.zeros_like(x_td)),0
     
     
-    def hessVec(self,v,x,htol): 
+    def hessVec(self, v, x, htol):
         params = x.td if isinstance(x,TorchVect) else x
         v_params = v.td if isinstance(v,TorchVect) else v
-        
         if not isinstance(params,collections.OrderedDict):
-            params =collections.OrderedDict(params)
+            params =  collections.OrderedDict(params)
         if not isinstance(v_params,collections.OrderedDict):
             v_params = collections.OrderedDict(v_params)
-            
-        def flatten(p):
-            return torch.cat([t.reshape(-1) for t in p.values()])
+        inputs_x = self.var['inputs_x'].detach().requires_grad_(True)
+        with torch.no_grad():
+            for name, p in self.var['NN'].named_parameters():
+                if name in params:
+                    p.copy_(params[name])
+        torch.set_grad_enabled(True)
+        from torch.nn.utils.stateless import functional_call
+        nn_output = functional_call(self.var['NN'], params, (inputs_x,))
+        gradNN = self.var['NN'].gradient(inputs_x)
+        lapNN = self.var['NN'].laplacian(inputs_x)
+        residual = (-self.var['gradk'] * gradNN).sum(-1) - self.var['k'] * lapNN - self.var['b']
+        loss = (residual**2).sum()
+        grads =  torch.autograd.grad(loss, [p for _, p in self.var['NN'].named_parameters()], create_graph=True)
+
+    #    grad,_ =self.gradient(x,htol)
+    
+        #if isinstance(x,TorchVect):
+        #    params = x.td
+        #    v_params = v.td
+        #else:
+        #    params = x
+        #    v_params = v
+        #params = collections.OrderedDict(params)
+        #v_params = collections.OrderedDict(v_params)
         
-        flat_params = flatten(params)
-        flat_v = flatten(v_params)
-        with torch.no_grad():
-            grad,_ = self.gradient(x,htol)
-            flat_grad = flatten(grad.td if isinstance(grad,TorchVect) else grad)
-            
-        eps = 1e-5
-        with torch.no_grad():
-            perturbed_params = collections.OrderedDict((k,p+eps*v_params[k]) for k,p in params.items())
-            perturbed_grad,_ = self.gradient(TorchVect(perturbed_params) if isinstance(x,TorchVect) else perturbed_params,htol)
-            
-            flat_perturbed_grad = flatten(perturbed_grad.td if isinstance(perturbed_grad,TorchVect) else perturbed_grad)
-            Hv_flat = (flat_perturbed_grad-flat_grad)/eps
-        #Unflatten the result
-        Hv = collections.OrderedDict()
-        idx = 0
-        for k,p in params.items():
-            numel = p.numel()
-            Hv[k] = Hv_flat[idx:idx+numel].reshape_as(p)
-            idx += numel
-            
-        return TorchVect(Hv) if isinstance(x,TorchVect) else Hv, 0
+    #        v_td = v.td if isinstance(v,TorchVect) else v
+    #        x_td = x.td
+    #    else:
+    #        v_td = v
+    #        x_td = x
+    #    x_td = {k: v.detach().requires_grad_(True) for k,v in x_td.items()}
+        #def flatten(p):
+        #    return torch.cat([t.reshape(-1) for t in p.values()])
+        #for k in params:
+        #    params[k] = params[k].detach().clone().requires_grad_(True)
+        #loss = self.value_torch(TorchVect(params) if isinstance(x,TorchVect) else params,htol)
+        #grads = torch.autograd.grad(loss, params.values(), create_graph=True)
+
+        flat_grad = torch.cat([g.reshape(-1) for g in grads])
+        flat_v = torch.cat([v_params[k].reshape(-1) for k in params.keys()])
+        gv = torch.dot(flat_grad, flat_v)
+        Hv_tensors = torch.autograd.grad(gv, [p for _, p in self.var['NN'].named_parameters()], retain_graph=False,create_graph=True)
+        Hv = collections.OrderedDict((k, hv if hv is not None else torch.zeros_like(params[k]))for k, hv in zip(params.keys(), Hv_tensors))
+        return TorchVect(Hv) if isinstance(x,TorchVect) else Hv,0
       class NNSetup:
     """
     Solve the NN control problem
