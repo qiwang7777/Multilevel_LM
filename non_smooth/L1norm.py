@@ -63,7 +63,7 @@ class L1Norm:
         return self.var['beta'] * np.dot(self.var['Rlump'].T, np.abs(x))
 
     def prox(self, x, t):
-        if self.var['useEuclidean']:
+        if self.Euclid_check:
             return np.maximum(0, np.abs(x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(x)
         else:
             return np.maximum(0, np.abs(x) - t * self.var['beta']) * np.sign(x)
@@ -94,3 +94,37 @@ class L1Norm:
 
     def get_parameter(self):
         return self.var['beta']
+
+class L1NormEuclid:
+    def __init__(self, var):
+        self.var = var
+
+    def value(self, x):
+        return self.var.beta * np.dot(self.var.R.T, np.abs(x))
+
+    def prox(self, x, t):
+        return np.maximum(0, np.abs(x) - t * self.var.R * self.var.beta) * np.sign(x)
+
+    def dir_deriv(self, s, x):
+        sx = np.sign(x)
+        return self.var.beta * (np.dot(sx.T, s) + np.dot((1 - np.abs(sx)).T, np.abs(s)))
+
+    def project_sub_diff(self, g, x):
+        sx = np.sign(x)
+        return self.var.beta * sx + (1 - np.abs(sx)) * np.clip(g, -self.var.beta, self.var.beta)
+
+    def gen_jac_prox(self, x, t):
+        d = np.ones_like(x)
+        px = self.prox(x, t)
+        ind = px == 0
+        d[ind] = 0
+        return np.diag(d), ind
+
+    def apply_prox_jacobian(self, v, x, t):
+        ind = np.abs(x) <= t * self.var.M0 * self.var.beta
+        Dv = v.copy()
+        Dv[ind] = 0
+        return Dv
+
+    def get_parameter(self):
+        return self.var.beta

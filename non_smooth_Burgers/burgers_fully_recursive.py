@@ -51,8 +51,10 @@ class BurgersSetup:
         self.A = mu * spdiags([o, d, o], [-1, 0, 1], n - 1, n - 1).tocsc() + A0 + A1
 
         # Build state observation matrix
-        o = (self.h / 6 - 1 / self.h) * np.ones(n - 1)
-        d = (2 * self.h / 3 + 2 / self.h) * np.ones(n - 1)
+        # o = (self.h / 6 - 1 / self.h) * np.ones(n - 1)
+        # d = (2 * self.h / 3 + 2 / self.h) * np.ones(n - 1)
+        o = (self.h / 6 ) * np.ones(n - 1)
+        d = (2 * self.h / 3 ) * np.ones(n - 1)
         self.M = spdiags([o, d, o], [-1, 0, 1], n - 1, n - 1).tocsc()
 
         # Build control operator
@@ -374,7 +376,6 @@ class ConstraintSolver:
 
 
     def solve(self, z, stol=1e-12):
-        nu = self.var['nu']
         u = self.uprev
 
 
@@ -534,10 +535,10 @@ def driver(savestats, name):
     np.random.seed(0)
 
     # Set up optimization problem
-    n          = 1024 # Number of cells
-    mu         = 0.06  # Viscosity
-    alpha      = 1e-4  # L2 penalty parameter
-    beta       = 1e-2  # L1 penalty parameter
+    n          = 8192 # Number of cells
+    mu         = 0.08  # Viscosity
+    alpha      = 1e-6  # L2 penalty parameter
+    beta       = 5e-4 # L1 penalty parameter
     usepc      = True  # Use piecewise constant controls
     useInexact = False
     derivCheck = False
@@ -581,6 +582,9 @@ def driver(savestats, name):
     params["t"]       = 2 / alpha
     params["ocScale"] = 1 / alpha
     params["gtol"]    = 1e-6
+    params['RgnormScale']      = 1e-2 # is v in Rgnorm >= v*gnorm -> relative R-step flag
+    params['RgnormScaleTol']   = 1e2  # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
+
 
     # Solve optimization problem
     start_time = time.time()

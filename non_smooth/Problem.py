@@ -4,7 +4,11 @@ from .L2Vectors import Euclidean, L2vectorPrimal, L2vectorDual
 class Problem:
     def __init__(self, var, R):
         self.var  = var
-        if var['useEuclidean']:
+        if hasattr(var, '__getitem__'):
+            Euclid_check = var['useEuclidean']
+        else:
+            Euclid_check = True
+        if Euclid_check:
             self.pvector   = Euclidean(var)
             self.dvector   = Euclidean(var)
         else:
