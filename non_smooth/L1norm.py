@@ -63,7 +63,7 @@ class L1Norm:
         return self.var['beta'] * np.dot(self.var['Rlump'].T, np.abs(x))
 
     def prox(self, x, t):
-        if self.Euclid_check:
+        if self.var['useEuclidean']:
             return np.maximum(0, np.abs(x) - t * self.var['Rlump'] * self.var['beta']) * np.sign(x)
         else:
             return np.maximum(0, np.abs(x) - t * self.var['beta']) * np.sign(x)

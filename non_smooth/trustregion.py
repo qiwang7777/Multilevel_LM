@@ -149,7 +149,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
 
         # Solve trust-region subproblem
         params['tolsp']                                        = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
-        s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, phi, problems, params, cnt, i=i-1)
+        s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, problems, params, cnt, i=i-1)
 
         # Update function information
         xnew             = x + s

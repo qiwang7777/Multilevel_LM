@@ -321,7 +321,7 @@ class SemilinearSetup2D:
         self.NT   = self.mesh.t.shape[0]
         self.N    = self.mesh.p.shape[0]
         self.Ndof = self.N
-        self.ctrl = 2 #ctrl
+        self.ctrl = ctrl
         self.alpha = alpha
         self.beta = beta
         # Generate boundary data; reset all boundary markers to Dirichlet / Neumann
@@ -369,7 +369,8 @@ class SemilinearSetup2D:
                 M = M + sparse(krow,kcol,Mt[:,i,j],self.N,self.N)
                 A = A + sparse(krow,kcol,At[:,i,j],self.N,self.N)
         # clear At Mt
-
+        A = A.toarray()
+        M = M.toarray()
         ## Assemble mass matrices with picewise constants
         B0 = sparse([], [], [], N+1, self.NT)
         M0 = sparse([], [], [], self.NT, self.NT)
@@ -381,8 +382,10 @@ class SemilinearSetup2D:
         # M0 = sparse(1:NT,1:NT,area,NT,NT)
 
         M0 = diags(area,shape=(self.NT, self.NT))
-        self.M  = M
-        self.A  = A
+        self.M  = M[self.FreeNodes,:]
+        self.M  = lil_matrix(self.M[:, self.FreeNodes])
+        self.A  = A[self.FreeNodes,:]
+        self.A  = lil_matrix(self.A[:, self.FreeNodes])
 
         self.ctrl_disc = 'pw_constant'
         self.za        = 0.
@@ -398,40 +401,36 @@ class SemilinearSetup2D:
 
         self.R             = np.squeeze(np.array(np.sum(self.M0, axis=1)))
         self.uD            = np.zeros(self.N,)
-        self.uD[self.dirichlet] = self.exactu(self.mesh.p[self.dirichlet, :])
-        self.b             = self.M[self.FreeNodes,:]*self.f(self.mesh.p, self.lamb) - self.A[self.FreeNodes,:]*self.uD
-        self.c             = self.udesired(self.mesh.p[self.FreeNodes, :])
+        self.uD[self.dirichlet] = 0. #self.exactu(self.mesh.p[self.dirichlet, :])
+        self.b             = np.zeros(self.FreeNodes.shape[0],) #M[self.FreeNodes,:]@self.f(self.mesh.p, self.lamb) - A[self.FreeNodes,:]@self.uD
+        self.c             = -np.ones(self.FreeNodes.shape[0],) #self.udesired(self.mesh.p[self.FreeNodes,:])
         self.nu            = self.N
 
-
-
-
 # exact solution u
-    def exactu(self, p):
-      return np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])
-
+    # def exactu(self, p):
+      # return np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])
 # right hand side
-    def f(self, p,lam):
-        t = 8*np.pi**2*(np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])) + self.exactu(p)**3
-        if self.ctrl == 1:
-            t -= self.exactz(p,lam)
-        elif self.ctrl == 2:
-            t -= self.exactz_constrained(p, lam, self.za, self.zb)
-        return t
-# ud
-    def udesired(self, p):
-        return self.exactu(p)-(8*np.pi**2+3*self.exactu(p)**2)*self.exactp(p)
-# p
-    def exactp(self, p):
-        return self.exactu(p)
-# z (unconstrained case)
-    def exactz(self, p,lam):
-        t = self.exactp(p)
-        return -t/lam
-# z (constrained case)
-    def exactz_constrained(self, p,lamb,a,b):
-        t = self.exactp(p)
-        return np.minimum(b,np.maximum(-t/lamb,a))
+#     def f(self, p,lam):
+#         t = 8*np.pi**2*(np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])) + self.exactu(p)**3
+#         if self.ctrl == 1:
+#             t -= self.exactz(p,lam)
+#         elif self.ctrl == 2:
+#             t -= self.exactz_constrained(p, lam, self.za, self.zb)
+#         return t
+# # ud
+#     def udesired(self, p):
+#         return self.exactu(p) - (8*np.pi**2+3*self.exactu(p)**2)*self.exactp(p)
+# # p
+#     def exactp(self, p):
+#         return self.exactu(p)
+# # z (unconstrained case)
+#     def exactz(self, p,lam):
+#         t = self.exactp(p)
+#         return -t/lam
+# # z (constrained case)
+#     def exactz_constrained(self, p,lamb,a,b):
+#         t = self.exactp(p)
+#         return np.minimum(b,np.maximum(-t/lamb,a))
 # nonlinear function
     def nonlin(self, x):
         u  = x**3
@@ -462,8 +461,6 @@ class SemilinearConstraintSolver2D:
     def __init__(self, var):
         self.var = var
         self.uprev = np.zeros(var.N)  # Previous state solution
-        #set up reduced matrices once
-        self.A = self.var.A[self.var.FreeNodes,self.var.FreeNodes]
 
     def begin_counter(self, iter, cnt0):
         return cnt0
@@ -474,6 +471,7 @@ class SemilinearConstraintSolver2D:
     def solve(self, z, stol=1e-12):
         """Solve the PDE constraint for given full x=[y,z] vector"""
         u = self.uprev
+        unew = copy.deepcopy(u)
         c, _ = self.value(np.hstack([u,z]))
         cnt = 0
         atol = stol
@@ -483,14 +481,14 @@ class SemilinearConstraintSolver2D:
         for _ in range(100):
             s,_ = self.apply_inverse_jacobian_1(self.value(np.hstack([u, z]))[0], np.hstack([u, z]))
 
-            unew = u - s
+            unew[self.var.FreeNodes] = u[self.var.FreeNodes] - s
             cnew = self.value(np.hstack([unew, z]))[0]
             ctmp = np.linalg.norm(cnew)
 
             alpha = 1
             while ctmp > (1 - 1e-4 * alpha) * cnorm:
                 alpha *= 0.1
-                unew = u - alpha * s
+                unew[self.var.FreeNodes]  = u[self.var.FreeNodes]  - alpha * s
                 cnew = self.value(np.hstack([unew, z]))[0]
                 ctmp = np.linalg.norm(cnew)
 
@@ -511,9 +509,7 @@ class SemilinearConstraintSolver2D:
         nu = self.var.nu
         u, z = x[:nu], x[nu:]
         (Nu,_, _) = self.evaluate_nonlinearity(u)
-        c = np.zeros(u.shape)
-        c[self.var.FreeNodes] -= (self.var.B0 @ z + self.var.b)
-        c += self.var.A @ u + Nu
+        c = self.var.A @ u[self.var.FreeNodes] + Nu[self.var.FreeNodes] - (self.var.B0 @ z + self.var.b)
         return c, 0.
 
     def apply_jacobian_1(self, v, x, gtol=1e-6):
@@ -521,23 +517,25 @@ class SemilinearConstraintSolver2D:
         nu = self.var.nu
         u = x[:nu]
         (_, J, _) = self.evaluate_nonlinearity(u)
+        J = J[self.var.FreeNodes,:]
+        J = J[:, self.var.FreeNodes]
         return  (self.var.A + J) @ v, 0
 
     def apply_jacobian_2(self, v, x, gtol=1e-6):
         """Apply adjoint Jacobian [J1^T; J2^T]"""
-        hv = np.zeros(self.uprev.shape)
-        hv[self.var.FreeNodes] = -self.var.B0 @ v
+        hv = -self.var.B0 @ v
         return hv,  0.
 
     def apply_adjoint_jacobian_1(self, v, x,gtol=1e-6):
         nu = self.var.nu
         u = x[:nu]
         (_,J,_) = self.evaluate_nonlinearity(u)
+        J = J[self.var.FreeNodes,:]
+        J = J[:, self.var.FreeNodes]
         return (self.var.A + J).T @ v, 0
 
     def apply_adjoint_jacobian_2(self, v,x,gtol=1e-6):
-        vt = v[self.var.FreeNodes]
-        hv = -self.var.B0.T @ vt
+        hv = -self.var.B0.T @ v
         return  hv, 0
 
     def apply_inverse_jacobian_1(self, v, x,gtol=1e-6):
@@ -545,31 +543,37 @@ class SemilinearConstraintSolver2D:
         u = x[:nu]
 
         (_,J,_) = self.evaluate_nonlinearity(u)
-        solution = sp.linalg.spsolve(self.var.A+J,v)
+        J = J[self.var.FreeNodes,:]
+        J = J[:, self.var.FreeNodes]
+        solution = sp.linalg.spsolve(self.var.A+J,v )
         return solution, 0
 
     def apply_inverse_adjoint_jacobian_1(self, v, x,gtol=1e-6):
         nu = self.var.nu
         u = x[:nu]
         (_, J, _) = self.evaluate_nonlinearity(u)
+        J = J[self.var.FreeNodes,:]
+        J = J[:, self.var.FreeNodes]
         return sp.linalg.spsolve((self.var.A + J).T, v), 0
 
     def apply_adjoint_hessian_11(self, w, v, x, htol=1e-6):
         nu = self.var.nu
         u = x[:nu]
-        (_, _, D) = self.evaluate_nonlinearity(u, ph = v)
+        (_, _, D) = self.evaluate_nonlinearity(u, pt = v)
+        D = D[self.var.FreeNodes,:]
+        D = D[:, self.var.FreeNodes]
         return D @ w, 0.
 
     def apply_adjoint_hessian_12(self, u, v, x,htol=1e-6):
         return np.zeros(self.var.B0.shape[1]), 0
 
     def apply_adjoint_hessian_21(self, u, v, x,htol=1e-6):
-        return np.zeros(self.var.nu), 0
+        return np.zeros(self.var.FreeNodes.shape[0]), 0
 
     def apply_adjoint_hessian_22(self, u, v, x,htol=1e-6):
         return np.zeros(self.var.B0.shape[1]), 0
 
-    def evaluate_nonlinearity(self, uh, ph=None):
+    def evaluate_nonlinearity(self, uh, pt=None):
       ## quadrature points and weights
       (lamb,weight) = quadpts(7)
       nQuad = lamb.shape[0]
@@ -579,27 +583,29 @@ class SemilinearConstraintSolver2D:
       ## assemble nonlinearities
       fn  = np.zeros((self.var.NT,3))
       Dfn = np.zeros((self.var.NT,3,3))
-      if ph is not None:
+      if pt is not None:
+        ph   = np.zeros(self.var.mesh.p.shape[0],)
+        ph[self.var.FreeNodes] = pt
         DDfn = np.zeros((self.var.NT, 3, 3))
       else:
         DDfn = None
       for p in range(0, nQuad):
           #evaluate uh at quadrature point
           uhp = uh[elem[:,0]]*lamb[p,0] + uh[elem[:,1]]*lamb[p,1] + uh[elem[:,2]]*lamb[p,2]
-          if ph is not None:
+          if pt is not None:
             php = ph[elem[:,0]]*lamb[p,0] + ph[elem[:,1]]*lamb[p,1] + ph[elem[:,2]]*lamb[p,2]
 
           (non,dnon, ddnon) = self.var.nonlin(uhp)
           for i in range(0,3):
               for j in range(0,3):
                   Dfn[:,i,j] += self.var.area*weight[p]*dnon*lamb[p,j]*lamb[p,i]
-                  if ph is not None:
+                  if pt is not None:
                       DDfn[:, i, j] += self.var.area * weight[p] * ddnon * php * lamb[p, j] * lamb[p,i]
               fn[:,i] += self.var.area*weight[p]*non*lamb[p,i]
 
       Newt = np.zeros((self.var.Ndof,))
       DNewt = sparse([], [], [], self.var.N,self.var.N)
-      if ph is not None:
+      if pt is not None:
           DDNewt = sparse([], [], [], self.var.N, self.var.N)
       else:
           DDNewt = None
@@ -608,7 +614,7 @@ class SemilinearConstraintSolver2D:
           for j in range(0,3):
               kcol = elem[:,j]
               DNewt += sparse(krow,kcol,Dfn[:,i,j],self.var.N,self.var.N)
-              if ph is not None:
+              if pt is not None:
                   DDNewt += sparse(krow, kcol, DDfn[:, i, j], self.var.N, self.var.N)
       # Newt +=  accumarray(elem(:),fn(:),[Ndof,1]);
       temp = np.bincount(elem.reshape(np.prod(elem.shape)), weights=fn.reshape(np.prod(fn.shape))).T
@@ -627,7 +633,7 @@ class SemilinearObjective2D:
     def value(self, x, ftol=1e-6):
         y = x[:self.var.nu]  # State portion
         z = x[self.var.nu:]  # Control portion
-        diff = y - self.var.uD
+        diff = y[self.var.FreeNodes]  - self.var.c
         # Ensure proper matrix-vector multiplication
         term1 = 0.5 * diff.T @ (self.var.M @ diff)
         term2 = 0.5 * self.var.alpha * (z.T @ self.var.M0 @ z)
@@ -636,7 +642,7 @@ class SemilinearObjective2D:
 
     def gradient_1(self, x, gtol=1e-6):
         u = x[:self.var.nu]
-        gradu = self.var.M @ (u - self.var.uD) # Simplified for diagonal M
+        gradu = self.var.M @ (u[self.var.FreeNodes]  - self.var.c) # Simplified for diagonal M
         return gradu, 0
 
     def gradient_2(self, x, gtol=1e-6):
@@ -650,7 +656,7 @@ class SemilinearObjective2D:
 
     # Apply objective function Hessian to a vector (hessVec_12)
     def hessVec_12(self, v, x, htol):
-        hv   = np.zeros((self.var.nu,))
+        hv   = np.zeros((self.var.B0.shape[0],))
         return hv, 0.
 
     # Apply objective function Hessian to a vector (hessVec_21)
@@ -694,11 +700,11 @@ def driver(savestats=True, name="semilinear_control_2d"):
     np.random.seed(0)
 
     # Problem parameters
-    n = 4  # 32x32 grid
+    n = 128  # 32x32 grid
     alpha = 1e-4
     beta = 1e-2
-    meshlist = [n]
-    # meshlist = [n,n//2]
+    # meshlist = [n]
+    meshlist = [n,n//2]
     problems = []
     # if (strcmp(GLB.ctrl_disc,'pw_constant')):
       #  z = zeros(NT,1)
@@ -721,14 +727,14 @@ def driver(savestats=True, name="semilinear_control_2d"):
         p.obj_smooth    = ReducedObjective(SemilinearObjective2D(S), SemilinearConstraintSolver2D(S))
         p.obj_nonsmooth = L1Norm(S)
         problems.append(p)
-        dim = S.NT
-        x   = np.ones(dim)
-        d   = np.ones(dim)
-        deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
-        vector_check(x, d, problems[i])
+        # dim = S.NT
+        # x   = np.ones(dim)
+        # d   = np.ones(dim)
+        # deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
+        # vector_check(x, d, problems[i])
 
     dim = 2*n*n
-    x0 = np.ones(dim)
+    x0 = np.zeros(dim)
 
 
     params = set_default_parameters("SPG2")
@@ -739,7 +745,8 @@ def driver(savestats=True, name="semilinear_control_2d"):
         "maxiter":100,
         "verbose":True,
         "useReduced":False,
-        "gtol":1e-7
+        "gtol":1e-6,
+        "RgnormScale":1e0 # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
         })
     # Solve optimization problem
     start_time = time.time()
@@ -749,26 +756,25 @@ def driver(savestats=True, name="semilinear_control_2d"):
 
     # Extract results
     var = problems[0].obj_nonsmooth.var
-    optimal_control = x_opt.reshape(dim//2, dim//2)
+
     optimal_state = problems[0].obj_smooth.con0.uprev
     X1, X2 = var.mesh.p[:,0], var.mesh.p[:,1]
 
     # Plot results
-    plt.figure(figsize=(15,5))
-
-    plt.subplot(1,3,1)
-    plt.contourf(X1, X2, var.uD.reshape(var.N,var.N), levels=50, cmap='viridis')
-    plt.colorbar()
+    fig = plt.figure(figsize=(15,5))
+    c = var.uD
+    c[var.FreeNodes] = var.c
+    ax = fig.add_subplot(131, projection='3d')
+    ax.plot_trisurf(X1, X2, c, cmap='viridis')
     plt.title("Target State $y_d$")
 
-    plt.subplot(1,3,2)
-    plt.contourf(X1, X2, optimal_state, levels=50, cmap='viridis')
-    plt.colorbar()
+    ax = fig.add_subplot(132, projection='3d')
+    ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
     plt.title("Optimal State $y$")
-
-    plt.subplot(1,3,3)
-    plt.contourf(X1, X2, optimal_control, levels=50, cmap='viridis')
-    plt.colorbar()
+    optimal_control = np.tile(x_opt,(1,3)).T.reshape(3*var.NT,)
+    nodenew = var.mesh.p[var.mesh.t.reshape(3*var.NT,),:]
+    ax = fig.add_subplot(133, projection='3d')
+    ax.plot_trisurf(nodenew[:,0], nodenew[:,1], optimal_control, cmap='viridis')
     plt.title("Optimal Control $z$")
 
     plt.tight_layout()

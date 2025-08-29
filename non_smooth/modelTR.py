@@ -17,7 +17,7 @@ class modelTR:
         self.nhess    = 0
         if subtype == 'recursive': #store grad at x
             self.problem.obj_smooth.update(self.x, 'init')
-            self.grad, _      = self.problem.obj_smooth.gradient(self.x, 0.)
+            self.grad, _      = self.problem.obj_smooth.gradient(self.x, 1.e-6)
             self.dgrad        = self.problem.dvector.dual(self.grad)
             self.ngrad       += 1
     def update(self, x, type):

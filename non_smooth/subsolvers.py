@@ -21,12 +21,14 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 
     # Evaluate model at GCP
     sHs    = 0
+    gs     = 0
     valold = val
     phiold = phi
+    hk0    = 0
     valnew = valold
     phinew = phiold
 
-    [sc,snormc,pRed,phic,Hsc,cnt,params] = trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt)
+    [sc,snormc,pRed,_,_,cnt,params] = trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt)
 
     t0     = params['t']
     s      = copy.deepcopy(sc)
@@ -46,7 +48,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         if snorm >= (1 - params['safeguard'])*params['delta']:
             ds = problem.pvector.dot(s, x0 - x)
             dd = gnorm**2
-            alphamax = np.min([1, (-ds + np.sqrt(ds**2 + dd * (params['delta']**2 - snorm0**2)))/dd])
+            alphamax = np.minimum(1, (-ds + np.sqrt(ds**2 + dd * (params['delta']**2 - snorm0**2)))/dd)
         Hs, _  = problem.obj_smooth.hessVec(s,x,params['gradTol'])
         cnt['nhess'] += 1
         sHs    = problem.dvector.apply(Hs,s)
@@ -56,8 +58,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         if sHs <= params['safeguard']*gnorm**2:
           alpha = alphamax
         else:
-          alpha = np.min([alphamax,alpha0])
-
+          alpha = np.minimum(alphamax,alpha0)
         ## Update iterate
         if (alpha == 1):
           x0     = x1
@@ -98,5 +99,4 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     pRed = (val+phi) - (valnew+phinew)
     if (iter0 > iter):
        iter = iter0
-    # print(snorm, pRed)
     return s, snorm, pRed, phinew, iflag, iter, cnt, params

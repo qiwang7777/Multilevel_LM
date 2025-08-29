@@ -31,10 +31,10 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
 
   alpha  = 1
   if (snorm >= (1-params['safeguard'])*params['delta']):
-    alpha = np.min([1, params['delta']/snorm])
+    alpha = np.minimum(1, params['delta']/snorm)
 
   if sHs > params['safeguard']*problem.pvector.dot(s,s):
-    alpha = np.min([alpha,-(gs+phinew-phi)/sHs]) #min(alpha,max(-(gs + phinew - phi), snorm^2 / t0)/sHs);
+    alpha = np.minimum(alpha,-(gs+phinew-phi)/sHs) #min(alpha,max(-(gs + phinew - phi), snorm^2 / t0)/sHs);
 
   if (alpha != 1):
     s      *= alpha
