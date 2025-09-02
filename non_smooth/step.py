@@ -11,11 +11,11 @@ from .Problem import Problem
 from .checks import deriv_check
 import pdb
 
-def trustregion_step(l,x,val,grad,problems,params,cnt, i=0):
+def trustregion_step(l,x,val,grad,phi, problems,params,cnt, i=0):
     #fine level l comes in
     dgrad                   = problems[l].dvector.dual(grad) #dual(grad) puts in primal space
     L                       = len(problems)
-    pgrad                   = problems[l].obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale'])
+    pgrad                   = problems[l].obj_nonsmooth.prox(x - params['ocScale'] * dgrad, params['ocScale']) #this is prox for phi_i(x_ik)
     cnt['nprox']           += 1
     debugflag               = 'R-step'
     ##Note: change Rdgnorm and gnorm to h_[i-1, 0] and h_[i,k]
@@ -25,9 +25,9 @@ def trustregion_step(l,x,val,grad,problems,params,cnt, i=0):
 
     R     = problems[l].R
     xt    = R @ x
-    gnorm = problems[l].pvector.norm(pgrad - x) / params['ocScale']
+    gnorm = problems[l].pvector.norm(pgrad - x) / params['ocScale'] # ||px_i - x_i||
     if l < L-1:
-      Rgnorm = problems[l+1].pvector.norm(R @ pgrad - xt) / params['ocScale']
+      Rgnorm = problems[l+1].pvector.norm(R @ pgrad - xt) / params['ocScale'] # R * px - R * x
     else:
       Rgnorm = 0.
     #adjust here for multilevel
@@ -37,18 +37,20 @@ def trustregion_step(l,x,val,grad,problems,params,cnt, i=0):
 
       p               = Problem(problems[l+1].obj_nonsmooth.var, problems[l+1].R) #make next level problem
       p.obj_smooth    = modelTR(problems, params["useSecant"], 'recursive', l = l+1, R = problems[l].R, dgrad = R @ dgrad, x = copy.deepcopy(xt))
-      p.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l+1)
+      p.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l+1, x = x)
       p.pvector       = problems[l+1].pvector
       p.dvector       = problems[l+1].dvector
       problemsL[l+1]  = p
 
       val, _           = p.obj_smooth.value(xt, 0.0)
       cnt['nobj1']    += 1
-      phi              = p.obj_nonsmooth.value(xt)
+      # phi_i-1(x_i-1)
+      # phi              = p.obj_nonsmooth.value(xt) # phi_i (R^T x_i-1) -> xt = R * x_i
       Deltai           = copy.copy(params['delta'])
       gtol_store       = params['gtol']
       params['gtol']   = params['RgnormScaleTol']*params['gtol']
       xnew, cnt_coarse = trustregion.trustregion(l+1, xt, Deltai, problemsL, params)
+
       #recompute snorm, pRed, phinew
       params['delta']  = Deltai
       params['gtol']   = gtol_store
@@ -78,8 +80,8 @@ def trustregion_step(l,x,val,grad,problems,params,cnt, i=0):
 
       problemTR               = Problem(problems[l].var, R)
       problemTR.obj_smooth    = modelTR(problems, params["useSecant"], 'spg', l = l, R = R, dgrad = dgrad, x = x)
-      problemTR.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l)
-      phi                     = problemTR.obj_nonsmooth.value(x)
+      problemTR.obj_nonsmooth = phiPrec(problems[0], R = R0, l = l, x = x)
+      # phi                     = problemTR.obj_nonsmooth.value(x) # evaluate fine level phi
       problemTR.pvector       = problems[l].pvector
       problemTR.dvector       = problems[l].dvector
       # d = np.random.randn((x.shape[0]))
@@ -94,7 +96,7 @@ def trustregion_step(l,x,val,grad,problems,params,cnt, i=0):
         pdb.set_trace()
         print(debugflag, pRed)
         stp
-    return s, snorm, pRed, phinew, phi, iflag, iter, cnt, params
+    return s, snorm, pRed, phinew, iflag, iter, cnt, params
 
 #Recursive step
 def Reye(x):
