@@ -9,7 +9,7 @@ from scipy.integrate import quad
 from scipy.sparse.linalg import spsolve
 import time, torch
 from non_smooth.checks import deriv_check, deriv_check_simopt, vector_check
-#from non_smooth.setDefaultParameters import set_default_parameters
+from non_smooth.setDefaultParameters import set_default_parameters
 from non_smooth.Problem import Problem
 #from non_smooth.L1norm import L1NormEuclid as L1Norm
 class L1Norm:
