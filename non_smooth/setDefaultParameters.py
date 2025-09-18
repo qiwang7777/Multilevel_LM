@@ -51,6 +51,27 @@ def set_default_parameters(name):
     params['RgnormScale']      = 1e-1 # is v in Rgnorm >= v*gnorm -> relative R-step flag
     params['RgnormScaleTol']   = 5e2  # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
 
+    # Debug / diagnostics (all optional; default off)
+    params.setdefault('debug_drop_gate', False)      # print drop-gate info each iter
+    params.setdefault('debug_h_equiv', False)        # print h-equivalence diagnostic
+    params.setdefault('debug_h_equiv_freq', 1)       # how often to print (every k iters)
+
+    # Numerical guards/tolerances
+    params.setdefault('prox_equiv_abs_tol', 1e-10)   # tight-frame prox identity tolerance
+    params.setdefault('min_drop_cap', 1e-8)          # min parent cap to allow dropping
+
+    # Existing gate scalars (set if not already)
+    params.setdefault('RgnormScale', 1.0)            # κ_g
+    params.setdefault('RgnormScaleTol', 100.0)       # ε_{i-1} scaling for coarse solve
+    
+    #child
+    params.setdefault('last_step_from_child',True)
+    params.setdefault('last_child_iflag',None)
+    params.setdefault('prev_near_boundary', False)
+    params.setdefault('nb_hit_valid_on_this_level',True)
+    params.setdefault('grow_cooldown_k',0)
+
+
 
 
     return params
