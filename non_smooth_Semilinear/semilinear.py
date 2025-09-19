@@ -1,6 +1,6 @@
 import os
 import sys
-sys.path.append(os.path.abspath('/Users/wang/Multilevel_LM'))
+sys.path.append(os.path.abspath('.'))
 
 import numpy as np
 import scipy.sparse as sp
