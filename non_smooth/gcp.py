@@ -16,7 +16,8 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
     t0Tmp = gg / gHg
   else:
     t0Tmp = params['t'] / np.sqrt(gg)
-
+  # import pdb
+  # pdb.set_trace()
   t0     = np.min([params['lam_max'],np.max([params['lam_min'], t0Tmp])])
   xc     = problem.obj_nonsmooth.prox(x - t0 * dgrad, t0)
   cnt['nprox'] += 1
@@ -33,7 +34,7 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
   if (snorm >= (1-params['safeguard'])*params['delta']):
     alpha = np.minimum(1, params['delta']/snorm)
 
-  if sHs > params['safeguard']*problem.pvector.dot(s,s):
+  if sHs > params['safeguard']: #*problem.pvector.dot(s,s):
     alpha = np.minimum(alpha,-(gs+phinew-phi)/sHs) #min(alpha,max(-(gs + phinew - phi), snorm^2 / t0)/sHs);
 
   if (alpha != 1):
