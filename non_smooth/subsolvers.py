@@ -55,7 +55,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         g0s    = problem.pvector.dot(g0,s)
         phinew = problem.obj_nonsmooth.value(x1)
         alpha0 = -(g0s + phinew - phiold) / sHs
-        if sHs <= params['safeguard']*gnorm**2:
+        if sHs <= params['safeguard']: #*gnorm**2:
           alpha = alphamax
         else:
           alpha = np.minimum(alphamax,alpha0)
@@ -74,13 +74,14 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         ## Update model information
         valold = valnew
         phiold = phinew
+
         ## Check step size
         if snorm >= (1-params['safeguard'])*params['delta']:
           iflag = 2
           break
 
         # Update spectral step length
-        if sHs <= params['safeguard']*gnorm**2:
+        if sHs <= params['safeguard']: #*gnorm**2:
           lambdaTmp = params['t']/problem.pvector.norm(g0)
         else:
           lambdaTmp = gnorm**2/sHs

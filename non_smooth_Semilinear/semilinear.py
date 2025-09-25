@@ -1319,7 +1319,10 @@ class SemilinearConstraintSolver2D:
         (_,J,_) = self.evaluate_nonlinearity(u)
         J = J[self.var.FreeNodes,:]
         J = J[:, self.var.FreeNodes]
-        solution = sp.linalg.spsolve(self.var.A+J,v )
+        if np.sqrt(v.shape[0]) < 128:
+          solution = sp.linalg.spsolve(self.var.A+J,v )
+        else:
+          solution, _ = sp.linalg.cg(self.var.A+J,v )
         return solution, 0
 
     def apply_inverse_adjoint_jacobian_1(self, v, x,gtol=1e-6):
@@ -1328,7 +1331,11 @@ class SemilinearConstraintSolver2D:
         (_, J, _) = self.evaluate_nonlinearity(u)
         J = J[self.var.FreeNodes,:]
         J = J[:, self.var.FreeNodes]
-        return sp.linalg.spsolve((self.var.A + J).T, v), 0
+        if np.sqrt(v.shape[0]) < 128:
+          solution = sp.linalg.spsolve((self.var.A + J).T,v )
+        else:
+          solution, _ = sp.linalg.cg((self.var.A + J).T,v )
+        return solution, 0
 
     def apply_adjoint_hessian_11(self, w, v, x, htol=1e-6):
         nu = self.var.nu
@@ -1354,28 +1361,20 @@ class SemilinearConstraintSolver2D:
       elem = self.var.mesh.t
       node = self.var.mesh.p
 
-      ## assemble nonlinearities
-      fn  = np.zeros((self.var.NT,3))
-      Dfn = np.zeros((self.var.NT,3,3))
+      # assemble nonlinearities
+      uhp                   = uh[elem] @ lamb.T
+      T2                   = np.einsum('ij,ik->ijk', lamb, lamb)
+      T3                   = np.einsum('i,ijk->ijk', weight, T2)
+      (non1,dnon1, ddnon1) = self.var.nonlin(uhp)
+      Dfn                  = np.einsum('ij,jkl->ikl',self.var.area[:,np.newaxis]*dnon1, T3)
       if pt is not None:
-        ph   = np.zeros(self.var.mesh.p.shape[0],)
-        ph[self.var.FreeNodes] = pt
-        DDfn = np.zeros((self.var.NT, 3, 3))
+          ph                     = np.zeros(self.var.mesh.p.shape[0],)
+          ph[self.var.FreeNodes] = pt
+          php                    = ph[elem] @ lamb.T
+          DDfn                  = np.einsum('ij,jkl->ikl',self.var.area[:,np.newaxis]*ddnon1*php, T3)
       else:
         DDfn = None
-      for p in range(0, nQuad):
-          #evaluate uh at quadrature point
-          uhp = uh[elem[:,0]]*lamb[p,0] + uh[elem[:,1]]*lamb[p,1] + uh[elem[:,2]]*lamb[p,2]
-          if pt is not None:
-            php = ph[elem[:,0]]*lamb[p,0] + ph[elem[:,1]]*lamb[p,1] + ph[elem[:,2]]*lamb[p,2]
-
-          (non,dnon, ddnon) = self.var.nonlin(uhp)
-          for i in range(0,3):
-              for j in range(0,3):
-                  Dfn[:,i,j] += self.var.area*weight[p]*dnon*lamb[p,j]*lamb[p,i]
-                  if pt is not None:
-                      DDfn[:, i, j] += self.var.area * weight[p] * ddnon * php * lamb[p, j] * lamb[p,i]
-              fn[:,i] += self.var.area*weight[p]*non*lamb[p,i]
+      fn                = np.dot(self.var.area[:,np.newaxis]*non1, weight[:,np.newaxis]*lamb)
 
       Newt = np.zeros((self.var.Ndof,))
       DNewt = sparse([], [], [], self.var.N,self.var.N)
@@ -1607,11 +1606,16 @@ def driver(savestats=True, name="semilinear_control_2d"):
 
     #Verify dimensions
         assert R.shape == (2*meshlist[i+1]**2,2*meshlist[i]**2) if i <len(meshlist)-1 else (2*meshlist[i]**2,2*meshlist[i]**2)
-        Svar = {'useEuclidean': False, 'Rlump': S.M0}
+        Svar = {'useEuclidean': True, 'Rlump': S.M0}
         p = Problem(Svar,R)
         p.obj_smooth    = ReducedObjective(SemilinearObjective2D(S), SemilinearConstraintSolver2D(S))
         p.obj_nonsmooth = L1Norm(S)
         problems.append(p)
+        # dim = S.NT
+        # x   = np.ones(dim)
+        # d   = np.ones(dim)
+        # deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
+        # vector_check(x, d, problems[i])
 
 
     dim = 2*n*n
@@ -1645,50 +1649,50 @@ def driver(savestats=True, name="semilinear_control_2d"):
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
     # Extract results
-    var = problems[0].obj_nonsmooth.var
+    # var = problems[0].obj_nonsmooth.var
 
-    optimal_state = problems[0].obj_smooth.con0.uprev
-    X1, X2 = var.mesh.p[:,0], var.mesh.p[:,1]
+    # optimal_state = problems[0].obj_smooth.con0.uprev
+    # X1, X2 = var.mesh.p[:,0], var.mesh.p[:,1]
 
-    # Plot results
-    # --- Target state (hide boundary) ---
-    fig = plt.figure(figsize=(15,5))
-    triangles = var.mesh.t  # (NT, 3) triangle connectivity
-    num_nodes = var.mesh.p.shape[0]
-    all_nodes = np.arange(num_nodes)
-    boundary_nodes = np.setdiff1d(all_nodes, var.FreeNodes)
+    # # Plot results
+    # # --- Target state (hide boundary) ---
+    # fig = plt.figure(figsize=(15,5))
+    # triangles = var.mesh.t  # (NT, 3) triangle connectivity
+    # num_nodes = var.mesh.p.shape[0]
+    # all_nodes = np.arange(num_nodes)
+    # boundary_nodes = np.setdiff1d(all_nodes, var.FreeNodes)
 
-    # build y_d over all nodes, then mask boundary
-    c_full = var.uD.copy()
-    c_full[var.FreeNodes] = var.c
-    c_plot = c_full.copy()
-    c_plot[boundary_nodes] = np.nan  # mask boundary nodes
+    # # build y_d over all nodes, then mask boundary
+    # c_full = var.uD.copy()
+    # c_full[var.FreeNodes] = var.c
+    # c_plot = c_full.copy()
+    # c_plot[boundary_nodes] = np.nan  # mask boundary nodes
 
-    ax = fig.add_subplot(131, projection='3d')
-    ax.plot_trisurf(X1, X2, c_plot, triangles=triangles, cmap='viridis')
-    plt.title("Target State $y_d$")
+    # ax = fig.add_subplot(131, projection='3d')
+    # ax.plot_trisurf(X1, X2, c_plot, triangles=triangles, cmap='viridis')
+    # plt.title("Target State $y_d$")
 
 
-    #c = var.uD
-    #c[var.FreeNodes] = var.c
-    #ax = fig.add_subplot(131, projection='3d')
-    #ax.plot_trisurf(X1, X2, c, cmap='viridis')
-    #plt.title("Target State $y_d$")
+    # #c = var.uD
+    # #c[var.FreeNodes] = var.c
+    # #ax = fig.add_subplot(131, projection='3d')
+    # #ax.plot_trisurf(X1, X2, c, cmap='viridis')
+    # #plt.title("Target State $y_d$")
 
-    ax = fig.add_subplot(132, projection='3d')
-    ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
-    plt.title("Optimal State $y$")
-    add_hyperparam_legend(ax, alpha, beta)
+    # ax = fig.add_subplot(132, projection='3d')
+    # ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
+    # plt.title("Optimal State $y$")
+    # add_hyperparam_legend(ax, alpha, beta)
 
-    optimal_control = np.tile(x_opt,(1,3)).T.reshape(3*var.NT,)
-    nodenew = var.mesh.p[var.mesh.t.reshape(3*var.NT,),:]
-    ax = fig.add_subplot(133, projection='3d')
-    ax.plot_trisurf(nodenew[:,0], nodenew[:,1], optimal_control, cmap='viridis')
-    plt.title("Optimal Control $z$")
-    add_hyperparam_legend(ax, alpha, beta)
+    # optimal_control = np.tile(x_opt,(1,3)).T.reshape(3*var.NT,)
+    # nodenew = var.mesh.p[var.mesh.t.reshape(3*var.NT,),:]
+    # ax = fig.add_subplot(133, projection='3d')
+    # ax.plot_trisurf(nodenew[:,0], nodenew[:,1], optimal_control, cmap='viridis')
+    # plt.title("Optimal Control $z$")
+    # add_hyperparam_legend(ax, alpha, beta)
 
-    plt.tight_layout()
-    plt.show()
+    # plt.tight_layout()
+    # plt.show()
 
 
     return x_opt, cnt_tr
