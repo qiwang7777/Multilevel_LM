@@ -365,9 +365,11 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         # counters from the child objects
         cnt = p.obj_smooth.addCounter(cnt)
         cnt = p.obj_nonsmooth.addCounter(cnt)
+        debug = 'recursive'
 
     else:
         # -------- SPG / TAYLOR BRANCH (stay on level l) --------
+        debug = 'spg'
         R_eye = Reye(x)  # identity on level l
 
         problemTR               = Problem(problems[l].var, R_eye)
@@ -392,6 +394,7 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     # safety
     if pRed < 0 and np.abs(pRed) > 1e-5:
+        print(debug)
         import pdb; pdb.set_trace()
 
     return s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params
@@ -1585,7 +1588,7 @@ def driver(savestats=True, name="semilinear_control_2d"):
     np.random.seed(0)
 
     # Problem parameters
-    n = 512 # 32x32 grid
+    n = 256 # 32x32 grid
     alpha = 1e-4
     beta = 1e-2
     #meshlist = [n]
@@ -1606,7 +1609,7 @@ def driver(savestats=True, name="semilinear_control_2d"):
 
     #Verify dimensions
         assert R.shape == (2*meshlist[i+1]**2,2*meshlist[i]**2) if i <len(meshlist)-1 else (2*meshlist[i]**2,2*meshlist[i]**2)
-        Svar = {'useEuclidean': True, 'Rlump': S.M0}
+        Svar = {'useEuclidean': False, 'Rlump': np.asarray(np.sum(S.M0, axis=1)).squeeze()}
         p = Problem(Svar,R)
         p.obj_smooth    = ReducedObjective(SemilinearObjective2D(S), SemilinearConstraintSolver2D(S))
         p.obj_nonsmooth = L1Norm(S)
