@@ -1,17 +1,95 @@
 import os
 import sys
 sys.path.append(os.path.abspath('..'))
-
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse import spdiags, dok_matrix, csr_matrix
-from scipy.integrate import quad
-from scipy.sparse.linalg import spsolve
+from scipy.sparse import  diags, lil_matrix, kron,eye,spdiags,block_diag
+#from scipy.integrate import quad
+#from scipy.sparse.linalg import spsolve
 import time, torch
-from non_smooth.checks import deriv_check, deriv_check_simopt, vector_check
-from non_smooth.setDefaultParameters import set_default_parameters
+#from non_smooth.checks import deriv_check, deriv_check_simopt, vector_check
+#from non_smooth.setDefaultParameters import set_default_parameters
 from non_smooth.Problem import Problem
 #from non_smooth.L1norm import L1NormEuclid as L1Norm
+
+def set_default_parameters(name):
+    params = {}
+
+    # General Parameters
+    params['spsolver']  = name.replace(' ', '')
+    params['outFreq']   = 1
+    params['debug']     = False
+    params['initProx']  = False
+    params['t']         = 1
+    params['safeguard'] = np.sqrt(np.finfo(float).eps)
+
+    # Stopping tolerances
+    params['maxit']   = 200
+    params['reltol']  = False
+    params['gtol']    = 1e-8
+    params['stol']    = 1e-10
+    params['ocScale'] = params['t']
+
+    # Trust-region parameters
+    params['eta1']     = 0.05
+    params['eta2']     = 0.9
+    params['gamma1']   = 0.25
+    params['gamma2']   = 2.5
+    params['delta']    = 1.e2
+    params['deltamax'] = 1e10
+
+    # Subproblem solve tolerances
+    params['atol']    = 1e-5
+    params['rtol']    = 1e-2
+    params['spexp']   = 1
+    params['maxitsp'] = 15
+    params['tolsp_floor'] = 1e-8
+
+    # GCP and subproblem solve parameter
+    params['useGCP']    = False
+    params['mu1']       = 1e-4
+    params['beta_dec']  = 0.1
+    params['beta_inc']  = 10.0
+    params['maxit_inc'] = 2
+
+    # SPG and spectral GCP parameters
+    params['lam_min'] = 1e-12
+    params['lam_max'] = 1e12
+
+    # Inexactness parameters
+    params['useInexactObj']  = False
+    params['useInexactGrad'] = False
+    params['gradTol']        = np.sqrt(np.finfo(float).eps)
+
+    # Recursive Parameters
+    params['RgnormScale']      = 1e-1 # is v in Rgnorm >= v*gnorm -> relative R-step flag
+    params['RgnormScaleTol']   = 5e2  # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
+
+    # Debug / diagnostics (all optional; default off)
+    params.setdefault('debug_drop_gate', False)      # print drop-gate info each iter
+    params.setdefault('debug_h_equiv', False)        # print h-equivalence diagnostic
+    params.setdefault('debug_h_equiv_freq', 1)       # how often to print (every k iters)
+
+    # Numerical guards/tolerances
+    params.setdefault('prox_equiv_abs_tol', 1e-10)   # tight-frame prox identity tolerance
+    params.setdefault('min_drop_cap', 1e-8)          # min parent cap to allow dropping
+
+    # Existing gate scalars (set if not already)
+    params.setdefault('RgnormScale', 1.0)            # κ_g
+    params.setdefault('RgnormScaleTol', 100.0)       # ε_{i-1} scaling for coarse solve
+    
+    #child
+    params.setdefault('last_step_from_child',True)
+    params.setdefault('last_child_iflag',None)
+    params.setdefault('prev_near_boundary', False)
+    params.setdefault('nb_hit_valid_on_this_level',True)
+    params.setdefault('grow_cooldown_k',0)
+
+
+
+
+
+    return params
 class L1Norm:
     def __init__(self, var,lo=-25.0,hi=25.0):
         self.var = var
@@ -19,10 +97,10 @@ class L1Norm:
         self.hi = hi
 
     def value(self, x):
-        return self.var.beta * np.dot(self.var.R.T, np.abs(x))
+        return self.var.beta * np.dot(self.var.Rlump.T, np.abs(x))
 
     def prox(self, x, t):
-        z_soft = np.maximum(0, np.abs(x) - t * self.var.R * self.var.beta) * np.sign(x)
+        z_soft = np.maximum(0, np.abs(x) - t * self.var.Rlump * self.var.beta) * np.sign(x)
         return np.clip(z_soft,self.lo,self.hi)
 
     def dir_deriv(self, s, x):
@@ -49,11 +127,12 @@ class L1Norm:
         mask_zero = (px == 0)
         mask_clip = (px <= self.lo + 0.0) | (px >= self.hi - 0.0)
         Dv[mask_zero | mask_clip] = 0
-
+        
         return Dv
 
     def get_parameter(self):
         return self.var.beta
+
 from non_smooth.modelTR import modelTR
 from non_smooth.subsolvers import trustregion_step_SPG2
 import copy
@@ -81,18 +160,18 @@ class PhiCounter:
         cnt["nobj2"] += self.nobj2
         cnt["nprox"] += self.nprox
         return cnt
-
+    
 
 class phiPrec:
     """
     Coarse-level nonsmooth φ_i built from previous level Problem {i-1}.
-
+    
     Piecewise definition:
         ∙ anchor x_{i,0} = R x_{i-1,k} or x_{i,j}==x_{i,0} -> φ_i(x_{i,0}) = φ_{i-1}(x_{i-1,k})
         ∙ else                                             -> φ_i(x) = φ_{i-1}(R.T @ x)
     Prox:
         prox_{tφ_i}(u) = u + R^T @ (prox_{tφ_{i-1}}(Ru)-Ru)
-
+        
     Parameters
     ----------
     problem: the previous level {i-1} Problem.
@@ -101,7 +180,7 @@ class phiPrec:
     x_fine : ndarray | None , The special x_{i-1,k} (on level i-1) to define x_{i,0} = R @ x_fine
     x_tol: float, Tolerance for detecting x = x_{i,0}.
     assume_tight_rows: bool, If True, enable the closed-form prox for the composition branch.
-
+    
     """
     def __init__(self, problems, R:np.ndarray,l: int, x_fine:Optional[np.ndarray]=None, x_tol:float=1e-12, assume_tight_rows:bool=True, use_anchor_in_prox:bool=False):
         self.problems = problems
@@ -116,7 +195,7 @@ class phiPrec:
         self.use_anchor_in_prox = bool(use_anchor_in_prox)
         if self.l>0 and self.R is not None and self.x_fine is not None:
             self._x_coarse = self.R @ self.x_fine
-
+            
     def update_x(self,x_fine:np.ndarray) -> None:
         """
         Update the special fine point x_{i-1,k} and cache x_{i,0} = R @ x_fine
@@ -125,19 +204,18 @@ class phiPrec:
         self.x_fine = x_fine
         if self.l>0 and self.R is not None:
             self._x_coarse = self.R @self.x_fine
-
+        
     def _is_anchor(self,x:np.ndarray) -> bool:
         if self._x_coarse is None:
             return False
         if x.shape != self._x_coarse.shape:
             return False
         return np.allclose(x,self._x_coarse,atol = self.x_tol,rtol=0.0)
-
+    
     def value(self,x:np.ndarray) -> float:
         """
-        Piecewise value:
-            ∙ anchor -> φ_{i-1}(x_{i-1,k})
-            ∙ else   -> φ_{i-1}(R.T@x)
+       φ_{c}(x) = φ_{f}(x_f+R^T(x-x_c)) with x_c = Rx_f
+     
         """
         if self.l == 0 or self.R is None:
             val = self.problems[0].obj_nonsmooth.value(x)
@@ -145,13 +223,20 @@ class phiPrec:
             if self._is_anchor(x):
                 val = self.problems[self.l-1].obj_nonsmooth.value(self.x_fine)
             else:
-                val = self.problems[self.l-1].obj_nonsmooth.value(self.R.T @ x)
+                prev = self.problems[self.l-1].obj_nonsmooth
+                x_coarse = self._x_coarse if self._x_coarse is not None else (self.R @ self.x_fine)
+                y = self.x_fine +self.R.T @ (x-x_coarse)
+                val = prev.value(y)
         self.nobj2 += 1
         return val
     def prox(self, u:np.ndarray,t:float) -> np.ndarray:
         """
-        Prox for the composition branch (global; anchor is a pointwise value condition).
-        prox_{tφ_i}(u) = u + R^T @ (prox_{tφ_{i-1}}(Ru)-Ru)
+        prox_{t φ_i}(u) with φ_i(x)=φ_{i-1}( x_fine + R^T (x - x_coarse) )
+        Closed-form under RR^T=I:
+          let v = u - x_coarse and y = x_fine + R^T v (fine-space),
+          then
+            z = v + R ( prox_{t φ_{i-1}}(y) - y )
+            x = x_coarse + z
 
         """
         if not self.assume_tight_rows:
@@ -160,8 +245,10 @@ class phiPrec:
             px = self.problems[0].obj_nonsmooth.prox(u,t)
             self.nprox += 1
             return px
+        
+       
         else:
-
+            
             n_coarse, n_fine = self.R.shape
             if u.shape[0] != n_coarse:
                  raise ValueError(
@@ -174,59 +261,57 @@ class phiPrec:
         #        px = self.R @ self.problems[self.l-1].obj_nonsmooth.prox(self.x_fine, t)
         #    else:
         #        px = self.R @ self.problems[self.l-1].obj_nonsmooth.prox(self.R.T @ u ,t)
-            RuT = self.R.T @ u
-            pRuT = self.problems[self.l-1].obj_nonsmooth.prox(RuT,t)
-            xcomp = u + self.R @ (pRuT-RuT)
-            if not self.use_anchor_in_prox or self._x_coarse is None:
-                self.nprox += 1
-                return xcomp
-            xanc = self._x_coarse
-            # evaluate piecewise objective values
             prev = self.problems[self.l-1].obj_nonsmooth
-            Fcomp = 0.5/t * np.linalg.norm(xcomp - u)**2 + prev.value(self.R.T @ xcomp)
-            Fanc  = 0.5/t * np.linalg.norm(xanc  - u)**2 + prev.value(self.x_fine)
-
-            # pick better (add a tiny tie tolerance)
-            if Fanc + 1e-12 < Fcomp:
-                px = xanc
-            else:
-                px = xcomp
-
+            x_coarse = self._x_coarse if self._x_coarse is not None else (self.R @ self.x_fine)
+            v = u - x_coarse
+            y = self.x_fine +self.R.T @ v
+            py = prev.prox(y,t)
+            z = v + self.R @(py-y)
+            xcomp = x_coarse+z
+            if not self.use_anchor_in_prox or self._x_coarse is None:
+                self.nprox +=1
+                return xcomp
+            Fcomp = 0.5 / t * np.linalg.norm(xcomp-u)**2 +prev.value(self.x_fine+self.R.T@(xcomp-x_coarse))
+            Fanc = 0.5 / t * np.linalg.norm(self._x_coarse-u)**2+prev.value(self.x_fine)
+            px = self._x_coarse if (Fanc +1e-12<Fcomp) else xcomp
+            
             self.nprox += 1
             return px
-
+    
     def addCounter(self, cnt):
         cnt["nobj2"] += self.nobj2
         cnt["nprox"] += self.nprox
         return cnt
-
+    
     def genJacProx(self, x, t):
         if self.l == 0 or self.R is None:
-            return self.problems[0].obj_nonsmooth.gen_jac_prox(x,t)
-        if self.l > 0:
-            D_prev, ind_prev = self.problems[self.l-1].obj_nonsmooth.gen_jac_prox(self.R.T @ x , t)
-            if D_prev is None:
-                return None, None
-            D_prev = np.asarray(D_prev)
-            n_i = self.R.shape[0]
-            J = np.eye(n_i)+self.R@(D_prev-np.eye(D_prev.shape[0]))@self.R.T
-            ind = None
-            if ind_prev is not None:
-                ind = (np.abs(self.R @ ind_prev.astype(float))>0).ravel()
-        #D, ind = self.problems[self.l].obj_nonsmooth.genJacProx(x, t)
+            return self.problems[0].obj_nonsmooth.gen_jac_prox(x, t)
+        prev = self.problems[self.l-1].obj_nonsmooth
+        x_coarse = self._x_coarse if self._x_coarse is not None else (self.R @ self.x_fine)
+        y = self.x_fine + self.R.T @ (x - x_coarse)
+        D_prev, ind_prev = prev.gen_jac_prox(y, t)
+        if D_prev is None: return None, None
+        D_prev = np.asarray(D_prev)
+        n_i = self.R.shape[0]
+        J = np.eye(n_i) + self.R @ (D_prev - np.eye(D_prev.shape[0])) @ self.R.T
+        ind = None
+        if ind_prev is not None:
+            ind = (np.abs(self.R @ ind_prev.astype(float)) > 0).ravel()
         return J, ind
-
+    
+    
     def applyProxJacobian(self, v, x, t):
         if self.l == 0 or self.R is None:
             return self.problems[0].obj_nonsmooth.apply_prox_jacobian(v,x,t)
-        Rtv = self.R.T @ v
-        Jprev = self.problems[self.l-1].obj_nonsmooth.apply_prox_jacobian(Rtv,self.R.T@x,t)
+        x_coarse = self._x_coarse if self._x_coarse is not None else (self.R @ self.x_fine)
+        y = self.x_fine + self.R.T @ (x - x_coarse)
+        Jprev_v = self.problems[self.l-1].obj_nonsmooth.apply_prox_jacobian(self.R.T @ v, y, t)
         #Dv = self.problems[self.l].obj_nonsmooth.applyProxJacobian(v, x, t)
-        return v+self.R@(Jprev-Rtv)
-
+        return v + self.R@(Jprev_v-self.R.T @ v)
+    
     def getParameter(self):
         #return self.problem.obj_nonsmooth.getParameter()
-        return (self.problems[0].obj_nonsmooth.get_parameter()
+        return (self.problems[0].obj_nonsmooth.get_parameter() 
                 if self.l==0 else self.problems[self.l-1].obj_nonsmooth.get_parameter())
 
 def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
@@ -267,9 +352,12 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         Rgnorm = problems[l+1].pvector.norm(pgrad_c - xt) / t
 
         # (tight-frame) prox identity diagnostic: should be tiny
-        RuT  = R_edge.T @ u_coarse                     # = P @ (x - t dgrad)
-        rhs  = u_coarse + R_edge @ (problems[l].obj_nonsmooth.prox(RuT, t) - RuT)
-        prox_ok = (np.linalg.norm(pgrad_c - rhs) <= params.get('prox_equiv_abs_tol', 1e-10))
+        # shifted prox identity check (RR^T = I)
+        x_coarse = phi_gate._x_coarse   # = R_edge @ x
+        y        = x + R_edge.T @ (u_coarse - x_coarse)     # fine-space argument
+        rhs      = u_coarse + R_edge @ (problems[l].obj_nonsmooth.prox(y, t) - y)
+        prox_ok  = (np.linalg.norm(pgrad_c - rhs) <= params.get('prox_equiv_abs_tol', 1e-10))
+
 
         # optional scalar h-equivalence print
         if params.get('debug_h_equiv', False) and (i % params.get('debug_h_equiv_freq', 1) == 0):
@@ -285,32 +373,21 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     # --- drop gate (use function arg i; do NOT shadow it anywhere) ---
     #abs_gate = min(1e-2,params['gtol'] * np.sqrt(x.shape[0] / 2.0))
-    abs_gate = max(params.get('abs_gate_min', 5e-5),params['gtol'] * np.sqrt(x.shape[0] / 2.0),params.get('abs_gate_frac', 0.6) * gnorm)
+    abs_gate = max(params.get('abs_gate_min', 5e-5),params['gtol'] * np.sqrt(x.shape[0] / 2.0),params.get('abs_gate_frac', 0.6) * gnorm) 
     drop_rel = (Rgnorm >= params['RgnormScale'] * gnorm)
     drop_abs = (Rgnorm >= abs_gate)
+
+
     if not prox_ok:
         print(f"[PROX-EQ l={l}] ||pgrad_c - rhs||={np.linalg.norm(pgrad_c - rhs):.3e} "
               f"tol={params.get('prox_equiv_abs_tol', 1e-10):.1e}")
 
-    do_recurse = (l < L - 1) and (i > 0) and prox_ok and cap_ok and drop_rel and drop_abs and (params['recurse_cooldown_k'] == 0)
-    #print("Rnorm:", Rgnorm, "gnorm:", gnorm,
-    #  "abs_gate:", min(1e-2, params['gtol']*np.sqrt(x.shape[0]/2.0)))
-    #if params.get('debug_drop_gate',False):
-    #    print("Rnorm:",Rgnorm, "gnorm:",gnorm,"abs_gate:",abs_gate,"cap:",cap,"prox_ok:",prox_ok,"do_recurse:",do_recurse)
-    # -- DEBUG: drop-gate details --
-    #print(f"[GATE l={l} i={i}] prox_ok={prox_ok} cap={cap:.3e} cap_ok={cap_ok} "
-    #      f"Rgnorm={Rgnorm:.3e} gnorm={gnorm:.3e} "
-    #      f"abs_gate={min(1e-2,params['gtol']*np.sqrt(x.shape[0]/2.0)):.3e} "
-    #      f"drop_rel={Rgnorm >= params['RgnormScale']*gnorm} "
-    #      f"drop_abs={Rgnorm >= min(1e-2,params['gtol']*np.sqrt(x.shape[0]/2.0))} "
-    #      f"→ do_recurse={do_recurse}")
-
+    do_recurse = (l < L - 1) and  drop_rel and drop_abs #and (params['recurse_cooldown_k'] == 0)
+    
 
 
     if do_recurse:
-        #print(f"[REC l={l}] A: entering recursive branch")
-        #print(f"[REC l={l}] B: deepcopy start")
-        # -------- RECURSIVE BRANCH (to level l+1) --------
+
         problemsL = copy.deepcopy(problems)
         #print(f"[REC l={l}] C: deepcopy done")
         params['recurse_cooldown_k'] = params['recurse_cooldown_N']
@@ -327,7 +404,7 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         # evaluate model & phi at xt
         val, _ = p.obj_smooth.value(xt, 0.0); cnt['nobj1'] += 1
         phi    = p.obj_nonsmooth.value(xt);   cnt['nobj2'] += 1
-
+        
 
         # child params (do not pollute parent)
         params_child          = copy.deepcopy(params)
@@ -343,7 +420,7 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         xnew, cnt_coarse = trustregion(l+1, xt, cap, problemsL, params_child)
         #params['last_step_from_child'] = True
         #params['last_child_iflag'] = cnt_coarse.get('iflag', 3)
-
+        
         #print(f"[RECURSE← l={l+1}] iflag_child={cnt_coarse.get('iflag','?')} "
         #      f"iter_child={cnt_coarse.get('iter','?')}")
         #params['nb_hit_valid_on_this_level'] = False  # step came from child
@@ -365,11 +442,9 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         # counters from the child objects
         cnt = p.obj_smooth.addCounter(cnt)
         cnt = p.obj_nonsmooth.addCounter(cnt)
-        debug = 'recursive'
 
     else:
         # -------- SPG / TAYLOR BRANCH (stay on level l) --------
-        debug = 'spg'
         R_eye = Reye(x)  # identity on level l
 
         problemTR               = Problem(problems[l].var, R_eye)
@@ -394,7 +469,6 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     # safety
     if pRed < 0 and np.abs(pRed) > 1e-5:
-        print(debug)
         import pdb; pdb.set_trace()
 
     return s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params
@@ -537,9 +611,7 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     if hasattr(problems[l].obj_smooth, 'end_counter'):
         cnt = problems[l].obj_smooth.end_counter(0, cnt)
 
-    # if params['useSecantPrecond']:
-        # problems[l].prec.apply         = lambda x: problems[l].secant.apply(x, problems[l].pvector, problems[l].dvector)
-        # problems[l].prec.apply_inverse = lambda x: problems[l].secant.apply_inverse(x, problems[l].pvector, problems[l].dvector)
+    
 
     # Output header
     if l == 0:
@@ -573,15 +645,15 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     #     print('tr', gnorm, gtol, l)
     #     cnt['iflag'] = 0
     #     return x, cnt
+    
+        
 
-
-
-
+    
     # Iterate
     for i in range(1, params['maxit'] + 1):
         if hasattr(problems[l].obj_smooth, 'begin_counter'):
             cnt = problems[l].obj_smooth.begin_counter(i, cnt)
-
+            
         if l != 0:
             dist = problems[l].pvector.norm(x - x0)
             cap  = Deltai - dist
@@ -595,7 +667,10 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         #print(f"del={params['delta']:8.6e}", f"del_eff={params['delta_effective']:8.6e}")
 
         # Solve trust-region subproblem
-        params['tolsp']                                        = min(params['atol'], params['rtol'] * gnorm ** params['spexp'])
+        rel = params['rtol'] * gnorm ** params['spexp']
+        tolsp = min(params['atol'], rel)
+        tolsp = max(params.get('tolsp_floor', 1e-8), tolsp)   # <- add a floor
+        params['tolsp'] = tolsp
         # -- DEBUG: pre-subproblem snapshot --
         #print(f"[TR l={l} i={i}] gnorm={gnorm:.3e} gtol={gtol:.3e} "
         #      f"δ={params['delta']:.3e} δ_eff={params['delta_effective']:.3e} tolsp={params['tolsp']:.3e}")
@@ -610,23 +685,13 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         aRed = (val + phi) - (valnew + phinew)
         rho   = aRed / max(1e-16, pRed)
         fracB = snorm / max(1e-16, params['delta_effective'])
-        #is_nb = _near_boundary(snorm, params['delta_effective'])
-        is_nb = (fracB>=0.8)
-        is_gq = (aRed>params['eta2']*pRed)
-        is_ok = (gnorm>10.0*gtol)
-        cg = 0.6
-        max_growth = 1.6
-        frac_thresh = 0.8
-        gpress       = max(0.0, fracB - frac_thresh)             # boundary pressure ∈ [0, 0.2..]
-        qpress       = max(0.0, rho   - params['eta2'])          # quality pressure
-        okpress      = max(0.0, gnorm/(10.0*gtol) - 1.0)         # how far from stationarity
-        # Optional mild cooldown so you don't grow every single iter
-        coolN = params.setdefault('grow_cooldown_N', 2)          # allow growth at most every N iters
+        
+        
         coolk = params.setdefault('grow_cooldown_k', 0)          # counter
         if coolk > 0:
             params['grow_cooldown_k'] = coolk - 1
 
-
+        
 
         if aRed < params['eta1'] * pRed:
             params['delta'] = params['gamma1'] * min(snorm, params['delta'])
@@ -640,21 +705,21 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             problems[l].obj_smooth.update(x, 'accept')
             # grad0 = grad
             grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-
-
+            
+            
             if (rho>params['eta2']) and (fracB>=0.9) and (gnorm>10*gtol):
                params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
+ 
 
 
-
-
+            
         if l != 0:
             dist = problems[l].pvector.norm(x - x0)
             residual = Deltai - dist
             if -1e-12 < residual < 0: residual = 0.0
             params['delta'] = min(params['delta'], max(0.0, residual))
           #params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
-
+         
         params['delta'] = max(0.0,min(params['delta'],params['deltamax']))
 
         # Output iteration history
@@ -790,6 +855,7 @@ def compute_gradient(x, problem, params, cnt):
 from non_smooth_Semilinear.quadpts import quadpts, sparse
 import matplotlib.pyplot as plt
 import copy
+
 class ReducedObjective:
     def __init__(self, obj0, con0):
         self.obj0 = obj0
@@ -1131,10 +1197,8 @@ class SemilinearSetup2D:
                 Mt[:,i,j] = area*((i==j)+1)/12
 
         ## Assemble the mass matrix in Omega
-        # M = sparse([], [], [], self.N,self.N)
-        # A = sparse([], [], [], self.N,self.N)
-        M = csr_matrix((self.N, self.N))
-        A = csr_matrix((self.N, self.N))
+        M = sparse([], [], [], self.N,self.N)
+        A = sparse([], [], [], self.N,self.N)
         for i in range(0, 3):
             krow = self.mesh.t[:,i]
             for j in range(0, 3):
@@ -1142,29 +1206,23 @@ class SemilinearSetup2D:
                 M = M + sparse(krow,kcol,Mt[:,i,j],self.N,self.N)
                 A = A + sparse(krow,kcol,At[:,i,j],self.N,self.N)
         # clear At Mt
-        # A = A.toarray()
-        # M = M.toarray()
+        A = A.toarray()
+        M = M.toarray()
         ## Assemble mass matrices with picewise constants
-        # B0t = sparse([], [], [], N+1, self.NT)
-        # M0 = sparse([], [], [], self.NT, self.NT)
-        B0 = dok_matrix((N+1, self.NT))
-        # M0 = coo_matrix((self.NT, self.NT))
+        B0 = sparse([], [], [], N+1, self.NT)
+        M0 = sparse([], [], [], self.NT, self.NT)
         for k in range(0, self.NT):
             # i = [self.mesh.t(k,1);mesh.t(k,2);mesh.t(k,3)]
             i = self.mesh.t[k,:].T
             Bt = area[k]/3 * np.ones((3,1))
-            B0[i[0],k] = B0[i[0],k] + Bt[0]
-            B0[i[1],k] = B0[i[1],k] + Bt[1]
-            B0[i[2],k] = B0[i[2],k] + Bt[2]
-            # B0 += sparse(i, k*np.ones((3,)), Bt.squeeze(), N+1, self.NT)
+            B0[i,k] += Bt
         # M0 = sparse(1:NT,1:NT,area,NT,NT)
-        # M0 = diags(area,shape=(self.NT, self.NT))
-        B0 = B0.tocsr()
-        M0 = spdiags(area,[0], self.NT, self.NT)
+
+        M0 = diags(area,shape=(self.NT, self.NT))
         self.M  = M[self.FreeNodes,:]
-        self.M  = self.M[:, self.FreeNodes]
+        self.M  = lil_matrix(self.M[:, self.FreeNodes]).tocsr()
         self.A  = A[self.FreeNodes,:]
-        self.A  = self.A[:, self.FreeNodes]
+        self.A  = lil_matrix(self.A[:, self.FreeNodes]).tocsr()
 
         self.ctrl_disc = 'pw_constant'
         self.za        = 0.
@@ -1177,39 +1235,19 @@ class SemilinearSetup2D:
         elif self.ctrl_disc == 'pw_linear':
           self.M0 = M
           self.B0 = B0
+          
+        #self.wL1 = np.asarray(self.M0.diagonal()).copy()
 
-        self.R                  = np.squeeze(np.array(np.sum(self.M0, axis=1)))
-        self.uD                 = np.zeros((self.N,))
+        self.Rlump             = np.squeeze(np.array(np.sum(self.M0, axis=1)))
+        self.uD            = np.zeros(self.N,)
         self.uD[self.dirichlet] = 0. #self.exactu(self.mesh.p[self.dirichlet, :])
-        self.b                  = np.zeros((self.FreeNodes.shape[0],)) #M[self.FreeNodes,:]@self.f(self.mesh.p, self.lamb) - A[self.FreeNodes,:]@self.uD
-        self.c                  = -np.ones(self.FreeNodes.shape[0],) #self.udesired(self.mesh.p[self.FreeNodes,:])
-        self.nu                 = self.N
+        self.b             = np.zeros(self.FreeNodes.shape[0],) #M[self.FreeNodes,:]@self.f(self.mesh.p, self.lamb) - A[self.FreeNodes,:]@self.uD
+        self.c             = -np.ones(self.FreeNodes.shape[0],) #self.udesired(self.mesh.p[self.FreeNodes,:])
+        self.nu            = self.N
+        #self.c             = self.udesired(self.mesh.p[self.FreeNodes,:])
+        
 
-# exact solution u
-    # def exactu(self, p):
-      # return np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])
-# right hand side
-#     def f(self, p,lam):
-#         t = 8*np.pi**2*(np.sin(2*np.pi*p[:,0]) * np.sin(2*np.pi*p[:,1])) + self.exactu(p)**3
-#         if self.ctrl == 1:
-#             t -= self.exactz(p,lam)
-#         elif self.ctrl == 2:
-#             t -= self.exactz_constrained(p, lam, self.za, self.zb)
-#         return t
-# # ud
-#     def udesired(self, p):
-#         return self.exactu(p) - (8*np.pi**2+3*self.exactu(p)**2)*self.exactp(p)
-# # p
-#     def exactp(self, p):
-#         return self.exactu(p)
-# # z (unconstrained case)
-#     def exactz(self, p,lam):
-#         t = self.exactp(p)
-#         return -t/lam
-# # z (constrained case)
-#     def exactz_constrained(self, p,lamb,a,b):
-#         t = self.exactp(p)
-#         return np.minimum(b,np.maximum(-t/lamb,a))
+
 # nonlinear function
     def nonlin(self, x):
         u  = x**3
@@ -1226,13 +1264,15 @@ class SemilinearSetup2D:
             'beta': self.beta,
             'A': self.A,
             'M': self.M,
-            'R': self.M,  # Using mass matrix as default
+            'Rlump': self.Rlump,  # Using mass matrix as default
             'B': -sp.eye(self.N),
             'ud': self.yd,
             'useEuclidean': useEuclidean,
-            'mesh': self.mesh,
-            'Rlump': self.Rlump
+            'mesh': self.mesh
+            
         }
+
+
 
 class SemilinearConstraintSolver2D:
     def __init__(self, var):
@@ -1322,10 +1362,7 @@ class SemilinearConstraintSolver2D:
         (_,J,_) = self.evaluate_nonlinearity(u)
         J = J[self.var.FreeNodes,:]
         J = J[:, self.var.FreeNodes]
-        if np.sqrt(v.shape[0]) < 128:
-          solution = sp.linalg.spsolve(self.var.A+J,v )
-        else:
-          solution, _ = sp.linalg.cg(self.var.A+J,v )
+        solution = sp.linalg.spsolve(self.var.A+J,v )
         return solution, 0
 
     def apply_inverse_adjoint_jacobian_1(self, v, x,gtol=1e-6):
@@ -1334,11 +1371,7 @@ class SemilinearConstraintSolver2D:
         (_, J, _) = self.evaluate_nonlinearity(u)
         J = J[self.var.FreeNodes,:]
         J = J[:, self.var.FreeNodes]
-        if np.sqrt(v.shape[0]) < 128:
-          solution = sp.linalg.spsolve((self.var.A + J).T,v )
-        else:
-          solution, _ = sp.linalg.cg((self.var.A + J).T,v )
-        return solution, 0
+        return sp.linalg.spsolve((self.var.A + J).T, v), 0
 
     def apply_adjoint_hessian_11(self, w, v, x, htol=1e-6):
         nu = self.var.nu
@@ -1364,20 +1397,28 @@ class SemilinearConstraintSolver2D:
       elem = self.var.mesh.t
       node = self.var.mesh.p
 
-      # assemble nonlinearities
-      uhp                   = uh[elem] @ lamb.T
-      T2                   = np.einsum('ij,ik->ijk', lamb, lamb)
-      T3                   = np.einsum('i,ijk->ijk', weight, T2)
-      (non1,dnon1, ddnon1) = self.var.nonlin(uhp)
-      Dfn                  = np.einsum('ij,jkl->ikl',self.var.area[:,np.newaxis]*dnon1, T3)
+      ## assemble nonlinearities
+      fn  = np.zeros((self.var.NT,3))
+      Dfn = np.zeros((self.var.NT,3,3))
       if pt is not None:
-          ph                     = np.zeros(self.var.mesh.p.shape[0],)
-          ph[self.var.FreeNodes] = pt
-          php                    = ph[elem] @ lamb.T
-          DDfn                  = np.einsum('ij,jkl->ikl',self.var.area[:,np.newaxis]*ddnon1*php, T3)
+        ph   = np.zeros(self.var.mesh.p.shape[0],)
+        ph[self.var.FreeNodes] = pt
+        DDfn = np.zeros((self.var.NT, 3, 3))
       else:
         DDfn = None
-      fn                = np.dot(self.var.area[:,np.newaxis]*non1, weight[:,np.newaxis]*lamb)
+      for p in range(0, nQuad):
+          #evaluate uh at quadrature point
+          uhp = uh[elem[:,0]]*lamb[p,0] + uh[elem[:,1]]*lamb[p,1] + uh[elem[:,2]]*lamb[p,2]
+          if pt is not None:
+            php = ph[elem[:,0]]*lamb[p,0] + ph[elem[:,1]]*lamb[p,1] + ph[elem[:,2]]*lamb[p,2]
+
+          (non,dnon, ddnon) = self.var.nonlin(uhp)
+          for i in range(0,3):
+              for j in range(0,3):
+                  Dfn[:,i,j] += self.var.area*weight[p]*dnon*lamb[p,j]*lamb[p,i]
+                  if pt is not None:
+                      DDfn[:, i, j] += self.var.area * weight[p] * ddnon * php * lamb[p, j] * lamb[p,i]
+              fn[:,i] += self.var.area*weight[p]*non*lamb[p,i]
 
       Newt = np.zeros((self.var.Ndof,))
       DNewt = sparse([], [], [], self.var.N,self.var.N)
@@ -1396,6 +1437,8 @@ class SemilinearConstraintSolver2D:
       temp = np.bincount(elem.reshape(np.prod(elem.shape)), weights=fn.reshape(np.prod(fn.shape))).T
       Newt +=  temp #vectorize elem and fn
       return Newt, DNewt, DDNewt
+
+
 
 class SemilinearObjective2D:
     def __init__(self, var):
@@ -1452,22 +1495,20 @@ def restriction_R_2d(m,n):
 
     """
 
-    r_1d = dok_matrix((m,n))
+    r_1d = lil_matrix((m,n))
     ratio = n//m
     for i in range(m):
         r_1d[i,i*ratio:(i+1)*ratio] = 1/(np.sqrt(ratio))
 
-    r_1d.tocsr()
-    # import pdb
 
-    # pdb.set_trace()
-    r_2d = sp.kron(r_1d,r_1d, format='csr')
-    R    = sp.bmat([[r_2d, None], [None, r_2d]])
-    # R = lil_matrix((2*m*m,2*n*n))
-    # R[:m*m,:n*n] = r_2d
-    # R[m*m:,n*n:] = r_2d
+    r_2d = kron(r_1d,r_1d).tocsc()
 
-    return R.tocsr()
+    R = lil_matrix((2*m*m,2*n*n))
+    R[:m*m,:n*n] = r_2d
+    R[m*m:,n*n:] = r_2d
+
+    return R.tocsc()
+
 def plot_tr_history(cnt):
     import numpy as np
     import matplotlib.pyplot as plt
@@ -1521,7 +1562,7 @@ def plot_tr_history(cnt):
     plt.legend()
 
     plt.show()
-
+    
 def plot_compare_single_vs_double(n):
     # run 1-level
     _, cnt1 = driver(meshlist=[n], do_plots=False)
@@ -1529,7 +1570,7 @@ def plot_compare_single_vs_double(n):
     # run 2-level
     _, cnt2 = driver(meshlist=[n,n//2,n//4,n//8], do_plots=False)
 
-
+    
 
     it1 = np.arange(len(cnt1.get('objhist', [])))
     it2 = np.arange(len(cnt2.get('objhist', [])))
@@ -1588,37 +1629,31 @@ def driver(savestats=True, name="semilinear_control_2d"):
     np.random.seed(0)
 
     # Problem parameters
-    n = 256 # 32x32 grid
+    n = 128 # 32x32 grid
     alpha = 1e-4
     beta = 1e-2
     #meshlist = [n]
-
-    meshlist = [n,n//2,n//4,n//8]
+    
+    meshlist = [n,n//2]
     problems = []
 
 
 
     for i in range(len(meshlist)):
-        print('Building ', meshlist[i], ' Grid')
         S = SemilinearSetup2D(meshlist[i],alpha,beta, 1)
 
         if i < len(meshlist)-1:
             R = restriction_R_2d(meshlist[i+1],meshlist[i])
         else:
-            R = sp.eye(2*meshlist[i]*meshlist[i],format='csr')
+            R = sp.eye(2*meshlist[i]*meshlist[i],format='csc')
 
     #Verify dimensions
         assert R.shape == (2*meshlist[i+1]**2,2*meshlist[i]**2) if i <len(meshlist)-1 else (2*meshlist[i]**2,2*meshlist[i]**2)
-        Svar = {'useEuclidean': False, 'Rlump': np.asarray(np.sum(S.M0, axis=1)).squeeze()}
-        p = Problem(Svar,R)
+
+        p = Problem(S,R)
         p.obj_smooth    = ReducedObjective(SemilinearObjective2D(S), SemilinearConstraintSolver2D(S))
         p.obj_nonsmooth = L1Norm(S)
         problems.append(p)
-        # dim = S.NT
-        # x   = np.ones(dim)
-        # d   = np.ones(dim)
-        # deriv_check(x, d, problems[i], 1e-4 * np.sqrt(np.finfo(float).eps))
-        # vector_check(x, d, problems[i])
 
 
     dim = 2*n*n
@@ -1634,8 +1669,8 @@ def driver(savestats=True, name="semilinear_control_2d"):
         "verbose":True,
         "useReduced":False,
         "gtol":1e-7,
-        "RgnormScale":0.85, # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
-        "RgnormScaleTol": 500,
+        "RgnormScale":0.05, # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
+        "RgnormScaleTol": 0.1,
         "debug_drop_gate":True,
         "debug_h_equiv":True,
         "debug_h_equiv_freq": 1,
@@ -1652,54 +1687,44 @@ def driver(savestats=True, name="semilinear_control_2d"):
     print(f"Optimization completed in {elapsed_time:.2f} seconds")
 
     # Extract results
-    # var = problems[0].obj_nonsmooth.var
+    var = problems[0].obj_nonsmooth.var
 
-    # optimal_state = problems[0].obj_smooth.con0.uprev
-    # X1, X2 = var.mesh.p[:,0], var.mesh.p[:,1]
+    optimal_state = problems[0].obj_smooth.con0.uprev
+    X1, X2 = var.mesh.p[:,0], var.mesh.p[:,1]
 
-    # # Plot results
-    # # --- Target state (hide boundary) ---
-    # fig = plt.figure(figsize=(15,5))
-    # triangles = var.mesh.t  # (NT, 3) triangle connectivity
-    # num_nodes = var.mesh.p.shape[0]
-    # all_nodes = np.arange(num_nodes)
-    # boundary_nodes = np.setdiff1d(all_nodes, var.FreeNodes)
+    # Plot results
+    # --- Target state (hide boundary) ---
+    fig = plt.figure(figsize=(15,5))
+    triangles = var.mesh.t  # (NT, 3) triangle connectivity
+    num_nodes = var.mesh.p.shape[0]
+    all_nodes = np.arange(num_nodes)
+    boundary_nodes = np.setdiff1d(all_nodes, var.FreeNodes)
 
-    # # build y_d over all nodes, then mask boundary
-    # c_full = var.uD.copy()
-    # c_full[var.FreeNodes] = var.c
-    # c_plot = c_full.copy()
-    # c_plot[boundary_nodes] = np.nan  # mask boundary nodes
+    # build y_d over all nodes, then mask boundary
+    c_full = var.uD.copy()
+    c_full[var.FreeNodes] = var.c
+    c_plot = c_full.copy()
+    c_plot[boundary_nodes] = np.nan  # mask boundary nodes
 
-    # ax = fig.add_subplot(131, projection='3d')
-    # ax.plot_trisurf(X1, X2, c_plot, triangles=triangles, cmap='viridis')
-    # plt.title("Target State $y_d$")
+    ax = fig.add_subplot(131, projection='3d')
+    ax.plot_trisurf(X1, X2, c_plot, triangles=triangles, cmap='viridis')
+    plt.title("Target State $y_d$")
 
 
-    # #c = var.uD
-    # #c[var.FreeNodes] = var.c
-    # #ax = fig.add_subplot(131, projection='3d')
-    # #ax.plot_trisurf(X1, X2, c, cmap='viridis')
-    # #plt.title("Target State $y_d$")
+    ax = fig.add_subplot(132, projection='3d')
+    ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
+    plt.title("Optimal State $y$")
+    add_hyperparam_legend(ax, alpha, beta)
+    
+    optimal_control = np.tile(x_opt,(1,3)).T.reshape(3*var.NT,)
+    nodenew = var.mesh.p[var.mesh.t.reshape(3*var.NT,),:]
+    ax = fig.add_subplot(133, projection='3d')
+    ax.plot_trisurf(nodenew[:,0], nodenew[:,1], optimal_control, cmap='viridis')
+    plt.title("Optimal Control $z$")
+    add_hyperparam_legend(ax, alpha, beta)
 
-    # ax = fig.add_subplot(132, projection='3d')
-    # ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
-    # plt.title("Optimal State $y$")
-    # add_hyperparam_legend(ax, alpha, beta)
-
-    # optimal_control = np.tile(x_opt,(1,3)).T.reshape(3*var.NT,)
-    # nodenew = var.mesh.p[var.mesh.t.reshape(3*var.NT,),:]
-    # ax = fig.add_subplot(133, projection='3d')
-    # ax.plot_trisurf(nodenew[:,0], nodenew[:,1], optimal_control, cmap='viridis')
-    # plt.title("Optimal Control $z$")
-    # add_hyperparam_legend(ax, alpha, beta)
-
-    # plt.tight_layout()
-    # plt.show()
-
+    plt.tight_layout()
+    plt.show()
+    
 
     return x_opt, cnt_tr
-
-
-
-x_opt,cnt_tr=driver()
