@@ -1,5 +1,5 @@
 import numpy as np
-def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
+def trustregion_gcp2(x,val,grad,dgrad,phi,problem,params,cnt):
   params.setdefault('safeguard', np.sqrt(np.finfo(float).eps))  # Numerical safeguard
   params.setdefault('lam_min', 1e-12)
   params.setdefault('lam_max', 1e12)
@@ -8,10 +8,10 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
   params.setdefault('gradTol', np.sqrt(np.finfo(float).eps)) # Gradient inexactness tolerance used for hessVec
 
   ## Compute Cauchy point as a single SPG step
-  Hg,_          = problem.obj_smooth.hessVec(dgrad,x,params['gradTol'])
+  Hg,_          = problem.obj_smooth.hessVec(grad,x,params['gradTol'])
   cnt['nhess'] += 1
-  gHg           = problem.dvector.apply(Hg, dgrad)
-  gg            = problem.pvector.dot(dgrad, dgrad)
+  gHg           = problem.dvector.apply(Hg, grad)
+  gg            = problem.pvector.dot(grad, grad)
   if (gHg > params['safeguard'] * gg):
     t0Tmp = gg / gHg
   else:
@@ -24,7 +24,7 @@ def trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt):
   Hs, _  = problem.obj_smooth.hessVec(s,x,params['gradTol'])
   cnt['nhess'] += 1
   sHs    = problem.dvector.apply(Hs,s)
-  gs     = problem.pvector.dot(dgrad,s)
+  gs     = problem.pvector.dot(grad,s)
   phinew = problem.obj_nonsmooth.value(xc)
   cnt['nobj2'] += 1
   alpha  = 1
