@@ -2,7 +2,7 @@ import numpy as np
 import copy
 from .gcp import trustregion_gcp2
 #Subsolver for Taylor model
-def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
+def trustregion_step_SPG2(x, val,grad, dgrad, phi, problem, params, cnt):
     params.setdefault('maxitsp', 10)
     ## Cauchy point parameters
     params.setdefault('lam_min', 1e-12)
@@ -16,7 +16,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     params.setdefault('spexp',    2) # hk0 exponent
 
     x0    = copy.deepcopy(x)
-    g0    = copy.deepcopy(dgrad)
+    g0_primal    = copy.deepcopy(grad)
     snorm = 0
 
     # Evaluate model at GCP
@@ -28,7 +28,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
     valnew = valold
     phinew = phiold
 
-    [sc,snormc,pRed,_,_,cnt,params] = trustregion_gcp2(x,val,dgrad,phi,problem,params,cnt)
+    [sc,snormc,pRed,_,_,cnt,params] = trustregion_gcp2(x,val,grad,dgrad,phi,problem,params,cnt)
 
     t0     = params['t']
     s      = copy.deepcopy(sc)
@@ -52,7 +52,7 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         Hs, _  = problem.obj_smooth.hessVec(s,x,params['gradTol'])
         cnt['nhess'] += 1
         sHs    = problem.dvector.apply(Hs,s)
-        g0s    = problem.pvector.dot(g0,s)
+        g0s    = problem.pvector.dot(g0_primal,s)
         phinew = problem.obj_nonsmooth.value(x1)
         alpha0 = -(g0s + phinew - phiold) / sHs
         if sHs <= params['safeguard']: #*gnorm**2:
@@ -62,11 +62,11 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
         ## Update iterate
         if (alpha == 1):
           x0     = x1
-          g0     += problem.dvector.dual(Hs)
+          g0_primal     += problem.dvector.dual(Hs)
           valnew = valold + g0s + 0.5 * sHs
         else:
           x0     += alpha*s
-          g0     += alpha*problem.dvector.dual(Hs)
+          g0_primal     += alpha*problem.dvector.dual(Hs)
           valnew = valold + alpha * g0s + 0.5 * alpha**2 * sHs
           phinew = problem.obj_nonsmooth.value(x0)
           snorm  = problem.pvector.norm(x0-x)
@@ -82,13 +82,13 @@ def trustregion_step_SPG2(x, val, dgrad, phi, problem, params, cnt):
 
         # Update spectral step length
         if sHs <= params['safeguard']: #*gnorm**2:
-          lambdaTmp = params['t']/problem.pvector.norm(g0)
+          lambdaTmp = params['t']/problem.pvector.norm(g0_primal)
         else:
           lambdaTmp = gnorm**2/sHs
 
         t0 = np.max([params['lam_min'],np.min([params['lam_max'], lambdaTmp])])
         ## Compute step
-        x1    = problem.obj_nonsmooth.prox(x0 - t0 * g0, t0)
+        x1    = problem.obj_nonsmooth.prox(x0 - t0 * g0_primal, t0)
         s     = x1 - x0
         ## Check for convergence
         gnorm = problem.pvector.norm(s)
