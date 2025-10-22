@@ -86,7 +86,7 @@ def trustregion_step(l,x,val,grad,phi, problems,params,cnt, i=0):
       problemTR.dvector       = problems[l].dvector
       # d = np.random.randn((x.shape[0]))
       # deriv_check(x, d, problemTR, 1e-4 * np.sqrt(np.finfo(float).eps))
-      s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(x, val, dgrad, phi, problemTR, params, cnt)
+      s, snorm, pRed, phinew, iflag, iter, cnt, params = trustregion_step_SPG2(x, val, grad, dgrad, phi, problemTR, params, cnt)
       cnt = problemTR.obj_smooth.addCounter(cnt)
       cnt = problemTR.obj_nonsmooth.addCounter(cnt)
 
