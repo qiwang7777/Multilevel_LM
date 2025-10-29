@@ -1,15 +1,239 @@
 import os
 import sys
-sys.path.append(os.path.abspath('.'))
+sys.path.append(os.path.abspath('/Users/wang/Multilevel_LM'))
 import numpy as np
 from non_smooth.Problem import Problem
-from non_smooth.modelTR import modelTR
+#from non_smooth.modelTR import modelTR
+import torch
 import copy, numbers, re
 import matplotlib.pyplot as plt
 from typing import Optional
 import collections, math, torch, time
 from collections import OrderedDict
 import torch.nn as nn
+
+
+
+
+class modelTR:
+    """
+    Trust-region model wrapper for level l.
+
+    - For l == 0: behaves like a thin forwarder to problems[l].obj_smooth
+      (subtype='spg').
+
+    - For l > 0 and subtype='recursive': builds a locally corrected coarse
+      model whose value/gradient near x_ref are nudged to match the restricted
+      fine-level info. This improves coarse/fine model agreement without
+      touching the nonsmooth/prox geometry.
+
+    Assumptions:
+    - x_ref is a TorchVect (has .td, an OrderedDict name->tensor)
+    - gradients returned by problem.obj_smooth.gradient(...) are TorchVect
+      (same structure).
+    - dgrad_from_fine is also a TorchVect with .td, already restricted to
+      this level's parameter structure.
+    """
+
+    def __init__(self,
+                 problems,
+                 l,
+                 x_ref,
+                 R_from_fine=None,
+                 dgrad_from_fine=None,
+                 use_secant=False,
+                 subtype='spg'):
+        self.problem     = problems[l]
+        self.l           = l
+        self.var         = self.problem.var
+
+        # finest level should not try recursive correction
+        self.subtype     = subtype if l > 0 else 'spg'
+        self.use_secant  = use_secant
+
+        # trust-region anchor state for this local model
+        self.x_ref       = x_ref                  # TorchVect at which we linearize
+        self.R           = R_from_fine            # restriction/prolong operator (RWrap)
+        self.Rdgrad      = dgrad_from_fine        # TorchVect: fine dual grad restricted here
+
+        # cached reference info
+        self.ref_val_coarse   = None              # scalar tensor
+        self.ref_grad_coarse  = None              # TorchVect.grad (TorchVect)
+        self.ref_grad_fine_restricted = None      # TorchVect.grad (TorchVect)
+        # note: we don't strictly need dual grads here once we convert below
+
+        # build that cache
+        self._build_reference_cache()
+
+    # ------------ small utilities working with TorchVect ------------
+
+    def _flatten_like_xref(self, grad_vec):
+        """
+        grad_vec: TorchVect whose .td matches param structure of x_ref
+        returns: 1D torch tensor concatenating all params in x_ref.td order
+        """
+        flats = []
+        for name in self.x_ref.td.keys():
+            flats.append(grad_vec.td[name].reshape(-1))
+        return torch.cat(flats)
+
+    def _flatten_params(self, x_vec):
+        """
+        x_vec: TorchVect, same param ordering as x_ref.
+        returns: 1D torch tensor
+        """
+        flats = []
+        for name in self.x_ref.td.keys():
+            flats.append(x_vec.td[name].reshape(-1))
+        return torch.cat(flats)
+
+    # ------------ build local reference state ------------
+
+    def _build_reference_cache(self):
+        """
+        Cache coarse-level value and gradient at x_ref,
+        and build the "target gradient" from fine-level info
+        projected to this level.
+
+        After this runs, we can provide corrected .value() and .gradient().
+        """
+        # Update the underlying smooth objective at x_ref
+        self.problem.obj_smooth.update(self.x_ref, 'init')
+
+        # Coarse value, gradient at x_ref
+        fval_coarse, _ = self.problem.obj_smooth.value(self.x_ref, ftol=1e-12)
+        grad_coarse, _ = self.problem.obj_smooth.gradient(self.x_ref, gtol=1e-12)
+        # grad_coarse is TorchVect
+
+        self.ref_val_coarse  = fval_coarse.detach()
+        # store a detached clone of gradient TorchVect
+        self.ref_grad_coarse = TorchVect({
+            name: g.detach().clone()
+            for name, g in grad_coarse.td.items()
+        })
+
+        # Build fine-restricted gradient target (only if recursive)
+        if self.subtype == 'recursive':
+            if self.Rdgrad is None:
+                raise RuntimeError("modelTR(subtype='recursive'): dgrad_from_fine (Rdgrad) is required")
+
+            # Rdgrad is a *dual*-space object as passed into the constructor.
+            # We want a primal gradient on this level that corresponds
+            # to the restricted fine gradient. In your original code you did:
+            #
+            #   self.Rgrad = problems[l].pvector.dual(self.Rdgrad)
+            #
+            # where pvector.dual maps a dual vector -> primal vector.
+            #
+            Rgrad_primal = self.problem.pvector.dual(self.Rdgrad)
+
+            # store detached copy as TorchVect
+            self.ref_grad_fine_restricted = TorchVect({
+                name: g.detach().clone()
+                for name, g in Rgrad_primal.td.items()
+            })
+        else:
+            self.ref_grad_fine_restricted = None
+
+    # ------------ interface used by trustregion() ------------
+
+    def begin_counter(self, it, cnt):
+        # forward to underlying smooth obj if it supports counters
+        if hasattr(self.problem.obj_smooth, 'begin_counter'):
+            return self.problem.obj_smooth.begin_counter(it, cnt)
+        return cnt
+
+    def end_counter(self, it, cnt):
+        if hasattr(self.problem.obj_smooth, 'end_counter'):
+            return self.problem.obj_smooth.end_counter(it, cnt)
+        return cnt
+
+    def update(self, x, typ):
+        # forward update to the underlying smooth objective
+        self.problem.obj_smooth.update(x, typ)
+
+    def value(self, x, ftol):
+        """
+        Return model value at x.
+
+        For subtype 'spg': just return underlying coarse value.
+
+        For 'recursive': we add a linear correction so that, at x_ref,
+        the model has the same gradient as the restricted fine-level gradient.
+        """
+        base_val, base_err = self.problem.obj_smooth.value(x, ftol)
+
+        if self.subtype != 'recursive':
+            return base_val, base_err
+
+        # linear correction term:
+        # (g_fine_ref - g_coarse_ref)^T (x - x_ref)
+        x_flat   = self._flatten_params(x)
+        x0_flat  = self._flatten_params(self.x_ref)
+
+        g_coarse0_flat = self._flatten_like_xref(self.ref_grad_coarse)
+        g_fine0_flat   = self._flatten_like_xref(self.ref_grad_fine_restricted)
+
+        delta_theta = x_flat - x0_flat
+        lin_term    = torch.dot(g_fine0_flat - g_coarse0_flat, delta_theta)
+
+        # constant shift:
+        # we CAN add f_fine(x_ref) - f_coarse(x_ref) here if we had f_fine(x_ref),
+        # but we do not necessarily have that at this level without extra plumbing.
+        # We'll keep const_term = 0, same spirit as your original linear correction.
+        const_term = 0.0
+
+        corrected_val = base_val + lin_term + const_term
+        return corrected_val, 0.0  # treat this surrogate as "exact" (err=0)
+
+    def gradient(self, x, gtol):
+        """
+        Return model gradient at x.
+
+        For subtype 'spg': just return underlying gradient.
+
+        For 'recursive': we mimic your original logic
+            grad += Rgrad - grad_ref
+        but generalized to TorchVect structure.
+
+        That enforces that at x_ref, the gradient aligns
+        with the restricted-fine gradient.
+        """
+        grad_x, gerr = self.problem.obj_smooth.gradient(x, gtol)
+        # grad_x is a TorchVect
+
+        if self.subtype != 'recursive':
+            return grad_x, gerr
+
+        corrected = {}
+        for name in grad_x.td.keys():
+            g_here      = grad_x.td[name]
+            g_ref_here  = self.ref_grad_coarse.td[name]
+            g_fine_here = self.ref_grad_fine_restricted.td[name]
+            corrected[name] = g_here + (g_fine_here - g_ref_here)
+
+        grad_corrected = TorchVect(corrected)
+        return grad_corrected, 0.0
+
+    def hessVec(self, v, x, htol):
+        """
+        Hessian-vector product model. For now we just forward to the
+        underlying problem, or use secant if requested.
+        """
+        if self.use_secant and hasattr(self.problem, 'secant'):
+            hv = self.problem.secant.apply(v, self.problem.pvector, self.problem.dvector)
+            return hv, 0.0
+        else:
+            hv, herr = self.problem.obj_smooth.hessVec(v, x, htol)
+            return hv, herr
+
+    def addCounter(self, cnt):
+        # your upstream code uses this to accumulate nobj1/ngrad/nhess
+        # we can keep it a no-op here
+        return cnt
+
+
+
 def _spg2_print_header(params, F0, res0, Delta, t):
     if not params.get('subsolver_print', False): return
     print("── SPG2-TR subsolver ─────────────────────────────────────────")
@@ -1214,91 +1438,61 @@ class phiPrec:
         return (self.problems[0].obj_nonsmooth.get_parameter() 
                 if self.l==0 else self.problems[self.l-1].obj_nonsmooth.get_parameter())
     
-def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
+def trustregion_step(l, x, val, grad, problem, problems, params, cnt, i=0):
     """
-    One TR step on level l. Decides whether to recurse to l+1 (coarser) or
-    solve on level l with LBFGS2.
-    Returns: s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params
+    One TR step on level l.
+
+    - Uses `problem`, which is the TR-local view of level l
+      (its obj_smooth is already a modelTR constructed in trustregion()).
+    - Decides whether to recurse to level l+1 (coarser) or solve locally with SPG2.
+    - Returns the trial step s and associated info.
     """
 
     # ---------- tiny helpers ----------
     def scalar(z):
         return float(z.detach()) if hasattr(z, "detach") else float(z)
 
-    class ConstShiftModel:
-        """
-        Wrap a smooth model with: value += <g_corr_dual, x-x0> + c0; gradient += g_corr (primal).
-        No Hessian change; constant shift doesn't affect pRed/aRed or gradients.
-        """
-        def __init__(self, base_model, pspace, dspace, x_base, g_corr_dual, c0):
-            self.base = base_model
-            self.ps   = pspace
-            self.ds   = dspace
-            self.x0   = x_base
-            self.gd   = g_corr_dual
-            self.c0   = float(c0)
-            
-        def update(self, x, how):
-            if hasattr(self.base, "update"):
-                return self.base.update(x, how)
-            return None
-
-    
-        def begin_counter(self, i, cnt):
-            if hasattr(self.base, "begin_counter"):
-                return self.base.begin_counter(i, cnt)
-            return cnt
-
-        def end_counter(self, i, cnt):
-            if hasattr(self.base, "end_counter"):
-                return self.base.end_counter(i, cnt)
-            return cnt
-
-        def value(self, x, ftol):
-            v0, ferr = self.base.value(x, ftol)
-            s   = x - self.x0
-            lin = self.ds.apply(self.gd, s)  # ⟨g_corr, s⟩
-            return v0 + lin + self.c0, ferr
-
-        def gradient(self, x, gtol):
-            g0, ferr = self.base.gradient(x, gtol)
-            g_corr_primal = self.gd if not hasattr(self.ds, "dual_inv") else self.ds.dual_inv(self.gd)
-            return g0 + g_corr_primal, ferr
-
-        def hessVec(self, v, x, htol):
-            return self.base.hessVec(v, x, htol)
-
-        def addCounter(self, ccnt):  # passthrough if base tracks counters
-            return self.base.addCounter(ccnt) if hasattr(self.base, "addCounter") else ccnt
-
     # ---------- basics ----------
     L     = len(problems)
     t     = params.get('ocScale', 1.0)
-    dgrad = problems[l].dvector.dual(grad)
 
-    # fine-level prox-gradient norm
-    pgrad_f = problems[l].obj_nonsmooth.prox(x - t * dgrad, t); cnt['nprox'] += 1
-    gnorm   = problems[l].pvector.norm(pgrad_f - x) / t
+    # dual gradient at current level
+    dgrad = problem.dvector.dual(grad)
 
-   
+    # prox-gradient norm at current level
+    pgrad_f = problem.obj_nonsmooth.prox(x - t * dgrad, t)
+    cnt['nprox'] += 1
+    gnorm   = problem.pvector.norm(pgrad_f - x) / t
 
-    # restriction to coarser (your convention: l+1 is coarser)
-    R_edge = problems[l].R
+    # restriction operator to next (coarser) level
+    # we assume each Problem in `problems` still has its .R mapping to l+1.
+    R_edge = problem.R
+
+    # candidate coarse iterate
     xt     = R_edge @ x
 
     # coarse-side gate metric
     Rgnorm = 0.0
     if l < L - 1:
+        # coarse nonsmooth proxy (phiPrec) built from parent/fine info
+        phi_gate = phiPrec(problems,
+                           R=R_edge,
+                           l=l+1,
+                           x_fine=x,
+                           assume_tight_rows=True)
+        # coarse dual grad = R_edge @ dgrad
         u_coarse = xt - t * (R_edge @ dgrad)
-        phi_gate = phiPrec(problems, R=R_edge, l=l+1, x_fine=x, assume_tight_rows=True)
-        pgrad_c  = phi_gate.prox(u_coarse, t); cnt['nprox'] += 1
+        pgrad_c  = phi_gate.prox(u_coarse, t)
+        cnt['nprox'] += 1
+
         Rgnorm   = problems[l+1].pvector.norm(pgrad_c - xt) / t
 
-    # --- base recurse gate (relative/absolute + boundary guard) ---
-    params.setdefault('RgnormScale',    0.5)
+    # --- gate for recursion ---
+    params.setdefault('RgnormScale',    0.7)
     params.setdefault('RgnormScaleTol', 0.5)
-    abs_floor = params.setdefault('abs_gate_min', 5e-5)
-    abs_frac  = params.setdefault('abs_gate_frac', 0.6)
+
+    abs_floor = params.setdefault('abs_gate_min',   5e-5)
+    abs_frac  = params.setdefault('abs_gate_frac',  0.8)
     gtol_gate = params.get('gtol', 1e-6)
     abs_gate  = max(abs_floor, abs_frac * scalar(gnorm), gtol_gate)
 
@@ -1313,118 +1507,120 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     do_recurse = (l < L - 1) and drop_rel and drop_abs and fracB_ok
 
-    # ---------- refine recurse decision with kappa/Δ_safe (inside do_recurse) ----------
+    # --- refine recurse decision: enforce radius sanity for child ---
     if do_recurse:
-        # exact coarse correction (NO scaling): first-order consistency
-        g_f_smooth, _ = problems[l].obj_smooth.gradient(x, params.get('gradTol', 1e-8));   cnt['ngrad'] += 1
-        g_c_base,  _  = problems[l+1].obj_smooth.gradient(xt, params.get('gradTol', 1e-8)); cnt['ngrad'] += 1
-        gf_dual   = problems[l].dvector.dual(g_f_smooth)      # fine dual
-        gc_dual   = problems[l+1].dvector.dual(g_c_base)      # coarse dual
-        Rgf_dual  = R_edge @ gf_dual                          # to coarse dual (per your API usage)
-        g_corr_dual = Rgf_dual - gc_dual
+        # compare smooth gradients fine vs coarse to build correction info
+        g_f_smooth, _ = problem.obj_smooth.gradient(x, params.get('gradTol', 1e-8))
+        cnt['ngrad'] += 1
+        g_c_base,  _ = problems[l+1].obj_smooth.gradient(xt, params.get('gradTol', 1e-8))
+        cnt['ngrad'] += 1
 
-        # coarse base physical value at xt
-        val_c0, _ = problems[l+1].obj_smooth.value(xt, 0.0); cnt['nobj1'] += 1
-        phi_c0    = problems[l+1].obj_nonsmooth.value(xt);   cnt['nobj2'] += 1
-        F0        = val_c0 + phi_c0
+        gf_dual   = problem.dvector.dual(g_f_smooth)        # fine dual
+        gc_dual   = problems[l+1].dvector.dual(g_c_base)    # coarse dual
+        Rgf_dual  = R_edge @ gf_dual                        # restricted fine dual
+        g_corr_dual = Rgf_dual - gc_dual                    # coarse dual correction
 
-        # Δ_safe from kappa
+        # baseline coarse F = f+phi at xt
+        val_c0, _ = problems[l+1].obj_smooth.value(xt, 0.0)
+        cnt['nobj1'] += 1
+        phi_c0      = problems[l+1].obj_nonsmooth.value(xt)
+        cnt['nobj2'] += 1
+        F0          = val_c0 + phi_c0
+
+        # parent radius budget
         Delta_parent_cap = params.get('delta_effective', params['delta'])
+
+        # norm in dual space to scale a safe radius
         gcnorm  = problems[l+1].dvector.norm(g_corr_dual)
-        kappa   = params.setdefault('coarse_lb_kappa', 1.0)  # keep ≥0 printed with shift
+        kappa   = params.setdefault('coarse_lb_kappa', 1.0)
+
         if scalar(gcnorm) > 0:
             Delta_safe_raw = scalar(F0) / max(1e-16, kappa * scalar(gcnorm))
         else:
             Delta_safe_raw = Delta_parent_cap
+
         Delta_safe = min(Delta_parent_cap, Delta_safe_raw)
         Delta_safe = max(0.0, Delta_safe)
 
-        # NEW: tiny-radius floor — skip recursion if Δ_safe is microscopic
-        delta_floor_abs  = params.setdefault('delta_child_floor_abs', 1e-6)
+        # radius floor to avoid recursing with absurdly tiny Δ
+        delta_floor_abs  = params.setdefault('delta_child_floor_abs',  1e-6)
         delta_floor_frac = params.setdefault('delta_child_floor_frac', 1e-3)
         delta_floor = max(delta_floor_abs, delta_floor_frac * float(Delta_parent_cap))
+
         if Delta_safe < delta_floor:
-            do_recurse = False  # fall back to same-level LBFGS branch
+            do_recurse = False
 
-    # ---------- recurse or stay ----------
+    # ---------- branch: recurse ----------
     if do_recurse:
-        problemsL = copy.deepcopy(problems)
-        
+        # We'll call `trustregion` recursively at level l+1.
+        # We must build the starting point x_coarse = xt
+        # and provide the coarse model the restricted fine dual grad (Rgf_dual).
+        #
+        # IMPORTANT:
+        # We do NOT build a new modelTR here.
+        # trustregion(l+1, ...) will internally wrap problems[l+1] with modelTR
+        # using R_from_fine=R_edge and dgrad_from_fine=(R_edge @ dgrad).
 
-        # constant shift so printed model ≥ 0 on ||s||≤Δ_safe; no gradient change
-        c0_shift = Delta_safe * scalar(gcnorm)
-
-        # child params (strict cap + tighter gtol)
-        params_child              = copy.deepcopy(params)
-        params_child['gtol']      = params.get('gtol', 1e-6) * params.setdefault('coarse_gtol_scale', 0.1)
-        params_child['delta']     = min(params_child['delta'], Delta_safe)
-        params_child['deltamax']  = Delta_safe      # cannot grow later
+        # Child params are a copy with tighter gtol and capped radius
+        shrink_factor = params.setdefault('child_delta_shrink', 0.5)
+        Delta_child = shrink_factor * Delta_safe
+        Delta_child   = max(0.0, Delta_child)
+        params_child             = copy.deepcopy(params)
+        params_child['gtol']     = params.get('gtol', 1e-6) * params.setdefault('coarse_gtol_scale', 0.1)
+        params_child['delta']    = min(params_child['delta'], Delta_child)
+        params_child['deltamax'] = Delta_child
         params_child.pop('delta_effective', None)
 
-        # child problem with wrapped smooth model
-        base_model = modelTR(problems, params.get("useSecant", False), 'recursive',
-                             l=l+1, R=R_edge, dgrad=(R_edge @ dgrad), x=copy.deepcopy(xt))
+        # Solve coarse level TR
+        xnew, cnt_coarse = trustregion(
+            l=l+1,
+            x0=xt,
+            Deltai=Delta_safe,
+            problems=problems,
+            params=params_child,
+            R_from_fine=R_edge,
+            dgrad_from_fine=(R_edge @ dgrad)  # restricted dual gradient
+        )
 
-        p = Problem(problems[l+1].obj_nonsmooth.var, problems[l+1].R)
-        p.obj_smooth    = ConstShiftModel(base_model, problems[l+1].pvector, problems[l+1].dvector,
-                                          x_base=xt, g_corr_dual=g_corr_dual, c0=c0_shift)
-        p.obj_nonsmooth = phiPrec(problems, R=R_edge, l=l+1, x_fine=x, assume_tight_rows=True)
-        p.pvector       = problems[l+1].pvector
-        p.dvector       = problems[l+1].dvector
-        problemsL[l+1]  = p
-
-        # evaluate wrapped model & phi at xt
-        val_wrapped, _ = p.obj_smooth.value(xt, 0.0); cnt['nobj1'] += 1
-        phi            = p.obj_nonsmooth.value(xt);   cnt['nobj2'] += 1
-
-        # solve child TR
-        xnew, cnt_coarse = trustregion(l+1, xt, Delta_safe, problemsL, params_child)
-
-        # lift step back to level l
+        # Lift child step back
         s     = R_edge.T @ (xnew - xt)
-        snorm = problems[l].pvector.norm(s)
+        snorm = problem.pvector.norm(s)
 
-        # evaluate trial (wrapped) for pRed
-        valnew_wrapped, _ = p.obj_smooth.value(xnew, 0.0); cnt['nobj1'] += 1
-        phinew            = p.obj_nonsmooth.value(xnew);   cnt['nobj2'] += 1
+        # Evaluate predicted reduction pRed for reporting
+        # We'll re-evaluate local coarse F before/after:
+        val_wrapped_new, _ = problems[l+1].obj_smooth.value(xnew, 0.0)
+        cnt['nobj1'] += 1
+        phi_new = problems[l+1].obj_nonsmooth.value(xnew)
+        cnt['nobj2'] += 1
 
-        pRed       = (val_wrapped + phi) - (valnew_wrapped + phinew)
-        print(pRed)
+        theta = params.setdefault('coarse_predred_damp', 0.5)
+        pRed   = theta * (F0 - (val_wrapped_new + phi_new))
+        phinew = phi_new
+        phi    = phi_c0
+
         iflag      = cnt_coarse.get('iflag', 3)
         iter_count = cnt_coarse.get('iter', 0)
 
-        # collect counters
-        cnt = p.obj_smooth.addCounter(cnt)
-        cnt = p.obj_nonsmooth.addCounter(cnt)
-
+    # ---------- branch: stay on this level ----------
     else:
-        # -------- stay on level l: LBFGS2 subsolver --------
-        R_eye = Reye(x)
-        problemTR               = Problem(problems[l].var, R_eye)
-        problemTR.obj_smooth    = modelTR(problems, params.get("useSecant", False), 'spg',
-                                          l=l, R=R_eye, dgrad=dgrad, x=x)
-        problemTR.obj_nonsmooth = PhiCounter(problems[l].obj_nonsmooth)
-        phi = problemTR.obj_nonsmooth.value(x)
+        # Solve subproblem on current level using SPG2-style inner solver.
+        # Here, unlike your original code, we DO NOT rebuild problemTR/modelTR;
+        # `problem` already *is* the wrapped model for this level.
 
-        problemTR.pvector = problems[l].pvector
-        problemTR.dvector = problems[l].dvector
+        phi = problem.obj_nonsmooth.value(x)
 
         s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_SPG2(
-            x, val, grad,dgrad, phi, problemTR, params, cnt
+            x, val, grad, dgrad, phi, problem, params, cnt
         )
-        cnt = problemTR.obj_smooth.addCounter(cnt)
-        cnt = problemTR.obj_nonsmooth.addCounter(cnt)
 
-    # safety (Torch-safe scalar)
-    if scalar(pRed) < 0 and abs(scalar(pRed)) > 1e-5:
-        import pdb; pdb.set_trace()
-        #pRed = 1e-16
+    # ---------- post-step bookkeeping ----------
 
-    # remember boundary info for next gate
+    # store info for next recurse gating
     params['last_snorm']     = snorm
     params['last_delta_eff'] = params.get('delta_effective', params['delta'])
 
     return s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params
+
 
 
 
@@ -1439,22 +1635,32 @@ def _not_too_close_to_opt(gnorm, gtol, factor=10.0):
     return gnorm > factor * gtol
 
 
-def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
-    """
-    Trust-region optimization algorithm.
 
-    Parameters:
-    x0 (np.array): Initial guess for the control variable.
-    problem (Problem): Problem class containing objective functions and vector spaces.
-    params (dict): Dictionary of algorithmic parameters.
 
-    Returns:
-    x (np.array): Optimized control variable.
-    cnt (dict): Dictionary of counters and history.
+def trustregion(l,
+                x0,
+                Deltai,
+                problems,
+                params,
+                R_from_fine=None,
+                dgrad_from_fine=None):
     """
+    Trust-region optimization on level l.
+
+    l                  : level index (0 = finest)
+    x0                 : starting point (TorchVect) on this level
+    Deltai             : trust-region radius passed down from above
+                         (for l=0 you can pass params['delta'])
+    problems           : list[Problem], one per level
+    params             : dict of TR parameters
+    R_from_fine        : restriction/prolong operator from next-finer level to this one
+                         (used only if l>0 to build recursive modelTR)
+    dgrad_from_fine    : restricted dual gradient from finer level (same structure as x0)
+    """
+
     start_time = time.time()
 
-    # Check and set default parameters
+    # ---- default params (same as your code) ----
     params.setdefault('outFreq', 1)
     params.setdefault('initProx', False)
     params.setdefault('t', 1.0)
@@ -1489,15 +1695,48 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     params.setdefault('scaleGradTol', 1e0)
     params.setdefault('prev_near_boundary', False)
 
-    # right after reading params and before the first print:
+    # --- initialize delta for this level ---
     if l == 0:
-        params['delta'] = min(params['delta'], params['deltamax'])   # Δ_0,0 = min(Δ_0^s, +∞)
+        # finest level: delta starts as min(delta, deltamax)
+        params['delta'] = min(params['delta'], params['deltamax'])
     else:
-        # Deltai is Δ_{i+1} in your signature
-        params['delta'] = min(params['delta'], params['deltamax'], Deltai)  # Δ_{i,0} = min(Δ_i^s, Δ_{i+1})
+        # coarser level: clamp by incoming radius Deltai
+        params['delta'] = min(params['delta'], params['deltamax'], Deltai)
 
+    # ---- Build TR-local problem wrapper ----
+    # shallow copy so we don't mutate `problems[l]`
+    problem_tr = copy.copy(problems[l])
 
-    # Initialize counters
+    # replace obj_smooth with modelTR view
+    if l == 0:
+        problem_tr.obj_smooth = modelTR(
+            problems=problems,
+            l=0,
+            x_ref=x0,
+            R_from_fine=None,
+            dgrad_from_fine=None,
+            use_secant=params['useSecant'],
+            subtype='spg'  # no correction at finest level
+        )
+    else:
+        problem_tr.obj_smooth = modelTR(
+            problems=problems,
+            l=l,
+            x_ref=x0,
+            R_from_fine=R_from_fine,
+            dgrad_from_fine=dgrad_from_fine,
+            use_secant=params['useSecant'],
+            subtype='recursive'  # <-- activate coarse correction
+        )
+
+    # Keep the same nonsmooth/TV/prox objects and vector spaces
+    # (We explicitly DO NOT touch these; that's how we preserve prox geometry.)
+    # problem_tr.obj_nonsmooth = problems[l].obj_nonsmooth  # already copied if shallow copy
+    # problem_tr.pvector       = problems[l].pvector
+    # problem_tr.dvector       = problems[l].dvector
+    # problem_tr.var           = problems[l].var
+
+    # ---- Initialize counters ----
     cnt = {
         'AlgType': f"TR-{params.get('spsolver', 'SPG2')}",
         'iter': 0,
@@ -1526,41 +1765,38 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         'gradtol': []
     }
 
-
-
-    # Compute initial function information
-    if hasattr(problems[l].obj_smooth, 'begin_counter'):
-        cnt = problems[l].obj_smooth.begin_counter(0, cnt)
+    # ---- initial objective/grad evaluation ----
+    if hasattr(problem_tr.obj_smooth, 'begin_counter'):
+        cnt = problem_tr.obj_smooth.begin_counter(0, cnt)
 
     if params['initProx']:
-        x = problems[l].obj_nonsmooth.prox(x0, 1)
+        x = problem_tr.obj_nonsmooth.prox(x0, 1)
         cnt['nprox'] += 1
     else:
         x = copy.deepcopy(x0)
-    if l == 0:
-      problems[l].obj_smooth.update(x, 'init')
-    ftol = 1e-12
-    if params['useInexactObj']:
-        ftol = params['maxValTol']
-    val, _      = problems[l].obj_smooth.value(x, ftol)
 
+    problem_tr.obj_smooth.update(x, 'init')
+
+    ftol = 1e-12 if not params['useInexactObj'] else params['maxValTol']
+    val, _ = problem_tr.obj_smooth.value(x, ftol)
     cnt['nobj1'] += 1
-    grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-    phi                 = problems[l].obj_nonsmooth.value(x)
+
+    grad, _, gnorm, cnt = compute_gradient(x, problem_tr, params, cnt)
+    phi = problem_tr.obj_nonsmooth.value(x)
     cnt['nobj2'] += 1
 
-    if hasattr(problems[l].obj_smooth, 'end_counter'):
-        cnt = problems[l].obj_smooth.end_counter(0, cnt)
+    if hasattr(problem_tr.obj_smooth, 'end_counter'):
+        cnt = problem_tr.obj_smooth.end_counter(0, cnt)
 
-    
-
-    # Output header
+    # ---- print header ----
     if l == 0:
-      print(f"\nRecursive Nonsmooth Trust-Region Method using {params.get('spsolver', 'SPG2')} Subproblem Solver")
-      print("level   iter          value           gnorm             del           snorm       nobjs      ngrad      nhess      nobjn      nprox    iterSP    flagSP")
-      print(f"{0:4d}   {0:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}             ---      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}       ---      ---")
+        print("\nRecursive Nonsmooth Trust-Region Method using",
+              params.get('spsolver', 'SPG2'),
+              "Subproblem Solver")
+        print("level   iter          value           gnorm             del           snorm       nobjs      ngrad      nhess      nobjn      nprox    iterSP    flagSP")
+        print(f"{0:4d}   {0:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}             ---      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}       ---      ---")
 
-    # Storage
+    # ---- store iteration 0 ----
     cnt['objhist'].append(val + phi)
     cnt['obj1hist'].append(val)
     cnt['obj2hist'].append(phi)
@@ -1574,100 +1810,96 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
     cnt['nproxhist'].append(cnt['nprox'])
     cnt['timehist'].append(np.nan)
 
-    # Set optimality tolerance
+    # tolerances
     gtol = params['gtol']
     stol = params['stol']
     if params['reltol']:
         gtol = params['gtol'] * gnorm
         stol = params['stol'] * gnorm
 
-    # Check stopping criterion
-    # if gnorm <= gtol:
-    #     print('tr', gnorm, gtol, l)
-    #     cnt['iflag'] = 0
-    #     return x, cnt
-    
-        
+    # ---- main TR loop ----
+    for it in range(1, params['maxit'] + 1):
+        if hasattr(problem_tr.obj_smooth, 'begin_counter'):
+            cnt = problem_tr.obj_smooth.begin_counter(it, cnt)
 
-    
-    # Iterate
-    for i in range(1, params['maxit'] + 1):
-        if hasattr(problems[l].obj_smooth, 'begin_counter'):
-            cnt = problems[l].obj_smooth.begin_counter(i, cnt)
-            
+        # effective radius (for coarse levels, clamp by Deltai "parent radius budget")
         if l != 0:
-            dist = problems[l].pvector.norm(x - x0)
+            dist = problem_tr.pvector.norm(x - x0)
             cap  = Deltai - dist
-            if -1e-12 < cap < 0:   # tiny negative → 0
+            if -1e-12 < cap < 0:
                 cap = 0.0
             delta_eff = max(0.0, min(params['delta'], cap))
         else:
             delta_eff = min(params['delta'], params['deltamax'])
 
         params['delta_effective'] = delta_eff
-        #print(f"del={params['delta']:8.6e}", f"del_eff={params['delta_effective']:8.6e}")
 
-        # Solve trust-region subproblem
-        rel = params['rtol'] * gnorm ** params['spexp']
+        # subproblem tolerance
+        rel   = params['rtol'] * gnorm ** params['spexp']
         tolsp = min(params['atol'], rel)
-        tolsp = max(params.get('tolsp_floor', 1e-8), tolsp)   # <- add a floor
+        tolsp = max(params.get('tolsp_floor', 1e-8), tolsp)
         params['tolsp'] = tolsp
-        # -- DEBUG: pre-subproblem snapshot --
-        #print(f"[TR l={l} i={i}] gnorm={gnorm:.3e} gtol={gtol:.3e} "
-        #      f"δ={params['delta']:.3e} δ_eff={params['delta_effective']:.3e} tolsp={params['tolsp']:.3e}")
-        s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, problems, params, cnt, i=i-1)
 
-        # Update function information
-        xnew             = x + s
-        problems[l].obj_smooth.update(xnew, 'trial')
-        valnew, val, cnt = compute_value(xnew, x, val, problems[l].obj_smooth, pRed, params, cnt)
+        # solve TR subproblem (you will need to update trustregion_step
+        # so that instead of indexing `problems[l]`, it directly uses `problem_tr`)
+        s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params = trustregion_step(l=l,x=x,val=val,grad=grad,problem=problem_tr,problems=problems,params=params,cnt=cnt,i=it-1)
 
-        # Accept/reject step and update trust-region radius
-        aRed = (val + phi) - (valnew + phinew)
+        # trial point
+        xnew = x + s
+        problem_tr.obj_smooth.update(xnew, 'trial')
+
+        # compute new smooth value (with possible inexact eval logic)
+        valnew, val_prev, cnt = compute_value(
+            xnew, x, val,
+            problem_tr.obj_smooth,
+            pRed, params, cnt
+        )
+
+        # acceptance test
+        aRed  = (val + phi) - (valnew + phinew)
         rho   = aRed / max(1e-16, pRed)
         fracB = snorm / max(1e-16, params['delta_effective'])
-        
-        
-        coolk = params.setdefault('grow_cooldown_k', 0)          # counter
+
+        # radius growth cooldown bookkeeping
+        coolk = params.setdefault('grow_cooldown_k', 0)
         if coolk > 0:
             params['grow_cooldown_k'] = coolk - 1
 
-        
-
+        # accept / reject step
         if aRed < params['eta1'] * pRed:
+            # reject
             params['delta'] = params['gamma1'] * params['delta']
-            problems[l].obj_smooth.update(x, 'reject')
+            problem_tr.obj_smooth.update(x, 'reject')
             if params['useInexactGrad']:
-                grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
+                grad, _, gnorm, cnt = compute_gradient(x, problem_tr, params, cnt)
         else:
-            x   = xnew
-            val = valnew
-            phi = phinew
-            problems[l].obj_smooth.update(x, 'accept')
-            # grad0 = grad
-            grad, _, gnorm, cnt = compute_gradient(x, problems[l], params, cnt)
-            
-            
-            if (rho>params['eta2']) and (fracB>=0.9) and (gnorm>10*gtol):
-               params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
- 
+            # accept
+            x    = xnew
+            val  = valnew
+            phi  = phinew
+            problem_tr.obj_smooth.update(x, 'accept')
 
+            grad, _, gnorm, cnt = compute_gradient(x, problem_tr, params, cnt)
 
-            
+            # only grow trust region if (a) model predicted well,
+            # (b) step hit the boundary of TR, (c) not near convergence
+            if (rho > params['eta2']) and (fracB >= 0.9) and (gnorm > 10 * gtol):
+                params['delta'] = min(params['deltamax'], params['gamma2'] * params['delta'])
+
+        # clamp delta in multilevel case
         if l != 0:
-            dist = problems[l].pvector.norm(x - x0)
+            dist = problem_tr.pvector.norm(x - x0)
             residual = Deltai - dist
-            if -1e-12 < residual < 0: residual = 0.0
-            
-          #params['delta'] = min(params['delta'], Deltai - problems[l].pvector.norm(x - x0))
-         
-        params['delta'] = max(0.0,min(params['delta'],params['deltamax']))
+            if -1e-12 < residual < 0:
+                residual = 0.0
 
-        # Output iteration history
-        if i % params['outFreq'] == 0:
-            print(f"{l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+        params['delta'] = max(0.0, min(params['delta'], params['deltamax']))
 
-        # Storage
+        # output iteration info
+        if it % params['outFreq'] == 0:
+            print(f"{l:4d}   {it:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+
+        # record history
         cnt['objhist'].append(val + phi)
         cnt['obj1hist'].append(val)
         cnt['obj2hist'].append(phi)
@@ -1681,24 +1913,27 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         cnt['nproxhist'].append(cnt['nprox'])
         cnt['timehist'].append(time.time() - start_time)
 
-        if hasattr(problems[l].obj_smooth, 'end_counter'):
-            cnt = problems[l].obj_smooth.end_counter(i, cnt)
+        if hasattr(problem_tr.obj_smooth, 'end_counter'):
+            cnt = problem_tr.obj_smooth.end_counter(it, cnt)
 
-        # Check stopping criterion
-        if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or (problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai and l!=0):
-            if i % params['outFreq'] != 0:
-                print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
-            if gnorm <= gtol:
-                flag = 0
-            elif i >= params['maxit']:
-                flag = 1
-            elif problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
-                flag = 2
-            else:
-                flag = 3
+        # stopping criteria
+        done = False
+        flag = None
+        if gnorm <= gtol:
+            flag = 0; done = True
+        elif it >= params['maxit']:
+            flag = 1; done = True
+        elif (problem_tr.pvector.norm(x - x0) > (1 - 1e-3)*Deltai and l != 0):
+            flag = 2; done = True
+        elif snorm <= stol:
+            flag = 3; done = True
+
+        if done:
+            if it % params['outFreq'] != 0:
+                print(f"{l:4d}   {it:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
             break
 
-    cnt['iter'] = i
+    cnt['iter'] = it
     cnt['timetotal'] = time.time() - start_time
 
     print("Optimization terminated because ", end="")
@@ -1710,10 +1945,13 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         print("finer trust-region radius met")
     else:
         print("step tolerance was met")
-    if l==0:
-      print(f"Total time: {cnt['timetotal']:8.6e} seconds")
+
+    if l == 0:
+        print(f"Total time: {cnt['timetotal']:8.6e} seconds")
+
     cnt['iflag'] = flag
     return x, cnt
+
 def compute_value(x, xprev, fvalprev, obj, pRed, params, cnt):
     """
     Compute the objective function value with inexactness handling.
@@ -2633,8 +2871,8 @@ class NNSetup:
             # Constant:
             #return 1.1*torch.ones_like(x)
             # Or variable (uncomment to try):
-             #return 1.1 + 0.2*torch.sin(2*math.pi*x)*torch.cos(2*math.pi*y)
-             return torch.full_like(x, 1.1) 
+             return 1.1 + 0.2*torch.sin(2*math.pi*x)*torch.cos(2*math.pi*y)
+             #return torch.full_like(x, 1.1) 
 
         # Autodiff to get grad u, lap u, grad k
         xy = xy.clone().detach().requires_grad_(True)
@@ -3478,7 +3716,7 @@ def adam_warmstart(nnset, var, steps=1000, lr=1e-3, batch=4096,
     print("adam done")
     return TorchVect(nnset.get_initial_params())
 
-def driver(savestats, name):
+def driver(NN_dim_coarse,savestats, name):
     print("driver started")
     np.random.seed(0)
 
@@ -3486,7 +3724,7 @@ def driver(savestats, name):
     n               = [30, 30]
     #NN_dims = [[2,500,1],[2,250,1],[2,125,1]]
     NN_dim_fine     = np.array([2, 60, 1])
-    NN_dim_coarse   = np.array([2, 30, 1])
+    #NN_dim_coarse   = np.array([2, 60, 1])
     #NN_dim_coarse_2 = np.array([2, 125, 1])
     if np.array_equal(NN_dim_fine, NN_dim_coarse):
         meshlist = [NN_dim_fine]
@@ -3545,6 +3783,52 @@ def driver(savestats, name):
             assert W.shape[1] == in_size,  f"{pname}: R cols {W.shape[1]} != param size {in_size}"
             assert W.shape[0] == out_size, f"{pname}: R rows {W.shape[0]} != target size {out_size}"
         return _attach_global_shape(R_try,x_fine)
+    
+    def check_R_orthonormality(R_wrap):
+        """
+        R_wrap : RWrap for fine->coarse at some level.
+                 We assume each block td[name] is (n_coarse, n_fine).
+
+        Prints per-parameter and global orthonormality diagnostics:
+          - Frobenius norm of (R R^T - I)
+          - spectral deviation of R R^T from I
+        """
+ 
+
+        frob_errors = []
+        spectral_errors = []
+
+        print("=== R orthonormality diagnostic ===")
+        for name, W in R_wrap.td.items():
+            # W: (m, n) mapping fine param vec -> coarse param vec
+            m, n = W.shape
+            # R R^T should be ~I_m
+            RRt = W @ W.T  # (m, m)
+            I   = torch.eye(m, dtype=W.dtype, device=W.device)
+
+            diff = RRt - I
+            frob_err = torch.linalg.norm(diff, ord='fro').item()
+            frob_errors.append(frob_err)
+
+            # spectral deviation: eigenvalues of RRt should be ~1
+            try:
+                # use symmetric eigendecomp
+                evals = torch.linalg.eigvalsh(RRt).real
+                spectral_dev = torch.max(torch.abs(evals - 1.0)).item()
+            except RuntimeError:
+                spectral_dev = float('nan')
+
+            spectral_errors.append(spectral_dev)
+
+            print(f"[{name}] m={m}, n={n}  ||RR^T-I||_F={frob_err:.3e}  "
+                  f"max|λ-1|={spectral_dev:.3e}")
+
+        # global summary
+        print("--- summary ---")
+        print(f"max Frobenius block error   = {max(frob_errors):.3e}")
+        print(f"max spectral  block error   = {max(spectral_errors):.3e}")
+        print("===================================")
+
     x_seed_next = None
 
     for i in range(len(meshlist)):
@@ -3567,6 +3851,7 @@ def driver(savestats, name):
         if i < len(meshlist) - 1:
             next_sizes = meshlist[i + 1]
             R_edge = _build_R_for_level(next_sizes, cur_sizes, x_fine=x)
+            check_R_orthonormality(R_edge)
      #       print("second blub")
             x_seed_next = R_edge @ x
             R = R_edge
@@ -3603,7 +3888,7 @@ def driver(savestats, name):
     cnt = {}
     params = set_default_parameters("spg2")
     params["reltol"]  = False
-    params['gtol']    = 8e-4
+    params['gtol']    = 1e-4
     params["t"]       = 2 / alpha
     params["ocScale"] = 1 / alpha
     #params['rtol']   = 3e-4
@@ -3611,11 +3896,11 @@ def driver(savestats, name):
     params['maxit'] = 1000
     params['maxitsp'] = 100
     params['gamma2'] = 2.0
-    #params['deltamax'] = 1e6
+    params['delta'] = 1e-3
     params["maxit"]   = 800
     params['deltamax'] = 1e13
-    params['RgnormScale'] = 0.6
-    params['RgnormScaleTol'] = 600
+    params['RgnormScale'] = 0.7
+    #params['RgnormScaleTol'] = 600
     params['recurse_cooldown_N'] = 3 
     # Sanity: evaluate TR-style loss with the warm-start weights
     tmp_nnset = NNSetup(meshlist[0], n[0], alpha, beta, n_samples=1)
@@ -3668,4 +3953,99 @@ def driver(savestats, name):
     print("Updated neural network is stored in `updated_nn`.")
     return cnt
 
-cnt = driver(False, "test_run")
+NN_dim_coarse1   = np.array([2, 60, 1])
+NN_dim_coarse2   = np.array([2, 30, 1])
+cnt1 = driver(NN_dim_coarse1,False, "test_run")
+cnt2 = driver(NN_dim_coarse2,False, "test_run")
+
+
+
+def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
+    """
+    Compare multiple runs (e.g. 1-level vs 2-level) on:
+      1. objective gap F(x_k) - F*
+      2. prox-stationarity norm ||g||_prox  (snormhist)
+      3. trust-region radius Δ_k (deltahist)
+    """
+
+    def to_numpy_safe(seq):
+        """Convert list of floats/tensors to a detached numpy array."""
+        if len(seq) == 0:
+            return np.array([])
+        out = []
+        for x in seq:
+            if isinstance(x, torch.Tensor):
+                out.append(x.detach().cpu().item() if x.numel() == 1 else x.detach().cpu().numpy())
+            else:
+                out.append(float(x))
+        return np.array(out, dtype=float)
+
+    fig, axs = plt.subplots(2, 1, figsize=(6.5, 7.5), sharex=True)
+
+    for run in run_data:
+        label = run.get("label", "run")
+        color = run.get("color", None)
+        ls    = run.get("ls", "-")
+
+        cnt_driver = run["cnt"]
+        cnt_tr = cnt_driver[1][0]   # extract the actual dict
+
+        # safely convert to numpy arrays
+        F_hist = to_numpy_safe(cnt_tr.get("objhist", []))
+        s_hist = to_numpy_safe(cnt_tr.get("snormhist", []))
+        #d_hist = to_numpy_safe(cnt_tr.get("deltahist", []))
+        if len(s_hist) == 0:
+            s_hist = to_numpy_safe(cnt_tr.get("gnormhist", []))
+
+        it = np.arange(len(F_hist))
+        if len(F_hist) == 0:
+            continue
+
+        F_star = F_hist[-1]
+
+        # 1) objective gap
+        axs[0].semilogy(it, np.maximum(F_hist - F_star, 1e-16),
+                        linewidth=2, label=label, color=color, ls=ls)
+
+        # 2) prox-stationarity norm
+        if len(s_hist) > 0:
+            axs[1].semilogy(it, s_hist + 1e-30,
+                            linewidth=2, label=label, color=color, ls=ls)
+
+        # 3) trust-region radius
+        #if len(d_hist) > 0:
+        #    axs[2].plot(it, d_hist,
+        #                linewidth=2, label=label, color=color, ls=ls)
+
+    # Cosmetics
+    axs[0].set_ylabel(r"$loss function value$")
+    axs[0].grid(True, which="both", alpha=0.4)
+    axs[0].set_title(title, fontsize=12, fontweight='bold')
+    axs[0].legend(loc="best", fontsize=9)
+
+    axs[1].set_ylabel(r"$h_k$")
+    axs[1].grid(True, which="both", alpha=0.4)
+    axs[1].legend(loc="best", fontsize=9)
+
+    axs[1].set_xlabel(r"TR iteration $k$")
+    #axs[2].set_ylabel(r"$\Delta_k$")
+    #axs[2].grid(True, alpha=0.4)
+    #axs[2].legend(loc="best", fontsize=9)
+
+    plt.tight_layout(h_pad=1.5)
+    plt.show()
+
+plot_convergence_summary([
+    {
+        "cnt": cnt1,
+        "label": "1-level (fine only)",
+        "color": "tab:blue",
+        "ls": "-"
+    },
+    {
+        "cnt": cnt2,
+        "label": "2-level",
+        "color": "tab:orange",
+        "ls": "--"
+    },
+], title="Convergence vs hierarchy depth")
