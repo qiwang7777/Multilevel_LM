@@ -1,9 +1,10 @@
 import os
 import sys
-sys.path.append(os.path.abspath('..'))
+sys.path.append(os.path.abspath('.'))
+
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse import  diags, lil_matrix, kron,eye,spdiags,block_diag
+from scipy.sparse import  diags, lil_matrix,coo_matrix, kron,eye,spdiags,block_diag,dok_matrix,csr_matrix
 #from scipy.integrate import quad
 #from scipy.sparse.linalg import spsolve
 import time, torch
@@ -134,7 +135,156 @@ class L1Norm:
         return self.var.beta
 
 from non_smooth.modelTR import modelTR
-from non_smooth.subsolvers import trustregion_step_SPG2
+#from non_smooth.subsolvers import trustregion_step_SPG2
+def trustregion_gcp2(x,val,grad,dgrad,phi,problem,params,cnt):
+  params.setdefault('safeguard', np.sqrt(np.finfo(float).eps))  # Numerical safeguard
+  params.setdefault('lam_min', 1e-12)
+  params.setdefault('lam_max', 1e12)
+  params.setdefault('t', 1)
+  params.setdefault('t_gcp', params['t'])
+  params.setdefault('gradTol', np.sqrt(np.finfo(float).eps)) # Gradient inexactness tolerance used for hessVec
+
+  ## Compute Cauchy point as a single SPG step
+  Hg,_          = problem.obj_smooth.hessVec(grad,x,params['gradTol'])
+  cnt['nhess'] += 1
+  gHg           = problem.dvector.apply(Hg, grad)
+  gg            = problem.pvector.dot(grad, grad)
+  if (gHg > params['safeguard'] * gg):
+    t0Tmp = gg / gHg
+  else:
+    t0Tmp = params['t'] / np.sqrt(gg)
+  t0     = np.min([params['lam_max'],np.max([params['lam_min'], t0Tmp])])
+  xc     = problem.obj_nonsmooth.prox(x - t0 * dgrad, t0)
+  cnt['nprox'] += 1
+  s      = xc - x
+  snorm  = problem.pvector.norm(s)
+  Hs, _  = problem.obj_smooth.hessVec(s,x,params['gradTol'])
+  cnt['nhess'] += 1
+  sHs    = problem.dvector.apply(Hs,s)
+  gs     = problem.pvector.dot(grad,s)
+  phinew = problem.obj_nonsmooth.value(xc)
+  cnt['nobj2'] += 1
+  alpha  = 1
+  if (snorm >= (1-params['safeguard'])*params['delta']):
+    alpha = np.minimum(1, params['delta']/snorm)
+
+  if sHs > params['safeguard']: #*problem.pvector.dot(s,s):
+    alpha = np.minimum(alpha,-(gs+phinew-phi)/sHs) #min(alpha,max(-(gs + phinew - phi), snorm^2 / t0)/sHs);
+
+  if (alpha != 1):
+    s      *= alpha
+    snorm  *= alpha
+    gs     *= alpha
+    Hs     *= alpha
+    sHs    *= alpha**2
+    xc     = x + s
+    phinew = problem.obj_nonsmooth.value(xc)
+    cnt['nobj2'] += 1
+
+  valnew = val + gs + 0.5*sHs
+  pRed   = (val+phi)-(valnew+phinew)
+  params['t_gcp'] = t0
+  return s, snorm, pRed, phi, Hs, cnt, params
+
+def trustregion_step_SPG2(x, val,grad, dgrad, phi, problem, params, cnt):
+    params.setdefault('maxitsp', 10)
+    ## Cauchy point parameters
+    params.setdefault('lam_min', 1e-12)
+    params.setdefault('lam_max', 1e12)
+    params.setdefault('t', 1)
+    params.setdefault('gradTol', np.sqrt(np.finfo(float).eps))
+    ## General parameters
+    params.setdefault('safeguard', np.sqrt(np.finfo(float).eps))  # Numerical safeguard
+    params.setdefault('atol',  1e-4) # Absolute tolerance
+    params.setdefault('rtol',  1e-2) # Relative tolerance
+    params.setdefault('spexp',    2) # hk0 exponent
+
+    x0    = copy.deepcopy(x)
+    g0_primal    = copy.deepcopy(grad)
+    snorm = 0
+
+    # Evaluate model at GCP
+    sHs    = 0
+    gs     = 0
+    valold = val
+    phiold = phi
+    hk0    = 0
+    valnew = valold
+    phinew = phiold
+
+    [sc,snormc,pRed,_,_,cnt,params] = trustregion_gcp2(x,val,grad,dgrad,phi,problem,params,cnt)
+
+    t0     = params['t']
+    s      = copy.deepcopy(sc)
+    x1     = x0 + s
+    gnorm  = snormc
+    gtol   = np.min([params['atol'], params['rtol']*(gnorm/t0)**params['spexp']])
+
+    # Set exit flag
+    iter  = 0
+    iflag = 1
+
+    for iter0 in range(1, params['maxitsp'] + 1):
+        alphamax = 1
+        snorm0   = snorm
+        snorm    = problem.pvector.norm(x1 - x)
+
+        if snorm >= (1 - params['safeguard'])*params['delta']:
+            ds = problem.pvector.dot(s, x0 - x)
+            dd = gnorm**2
+            alphamax = np.minimum(1, (-ds + np.sqrt(ds**2 + dd * (params['delta']**2 - snorm0**2)))/dd)
+        Hs, _  = problem.obj_smooth.hessVec(s,x,params['gradTol'])
+        cnt['nhess'] += 1
+        sHs    = problem.dvector.apply(Hs,s)
+        g0s    = problem.pvector.dot(g0_primal,s)
+        phinew = problem.obj_nonsmooth.value(x1)
+        alpha0 = -(g0s + phinew - phiold) / sHs
+        if sHs <= params['safeguard']: #*gnorm**2:
+          alpha = alphamax
+        else:
+          alpha = np.minimum(alphamax,alpha0)
+        ## Update iterate
+        if (alpha == 1):
+          x0     = x1
+          g0_primal     += problem.dvector.dual(Hs)
+          valnew = valold + g0s + 0.5 * sHs
+        else:
+          x0     += alpha*s
+          g0_primal     += alpha*problem.dvector.dual(Hs)
+          valnew = valold + alpha * g0s + 0.5 * alpha**2 * sHs
+          phinew = problem.obj_nonsmooth.value(x0)
+          snorm  = problem.pvector.norm(x0-x)
+
+        ## Update model information
+        valold = valnew
+        phiold = phinew
+
+        ## Check step size
+        if snorm >= (1-params['safeguard'])*params['delta']:
+          iflag = 2
+          break
+
+        # Update spectral step length
+        if sHs <= params['safeguard']: #*gnorm**2:
+          lambdaTmp = params['t']/problem.pvector.norm(g0_primal)
+        else:
+          lambdaTmp = gnorm**2/sHs
+
+        t0 = np.max([params['lam_min'],np.min([params['lam_max'], lambdaTmp])])
+        ## Compute step
+        x1    = problem.obj_nonsmooth.prox(x0 - t0 * g0_primal, t0)
+        s     = x1 - x0
+        ## Check for convergence
+        gnorm = problem.pvector.norm(s)
+        if (gnorm/t0 <= gtol):
+          iflag = 0
+          break
+
+    s    = x0 - x
+    pRed = (val+phi) - (valnew+phinew)
+    if (iter0 > iter):
+       iter = iter0
+    return s, snorm, pRed, phinew, iflag, iter, cnt, params
 import copy
 from non_smooth_Semilinear.quadpts import quadpts, sparse
 import matplotlib.pyplot as plt
@@ -373,7 +523,17 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     # --- drop gate (use function arg i; do NOT shadow it anywhere) ---
     #abs_gate = min(1e-2,params['gtol'] * np.sqrt(x.shape[0] / 2.0))
-    abs_gate = max(params.get('abs_gate_min', 5e-5),params['gtol'] * np.sqrt(x.shape[0] / 2.0),params.get('abs_gate_frac', 0.6) * gnorm) 
+    gtol_gate = params.get('gtol_gate', params['gtol'])
+
+    use_abs_dim_term = params.get('use_abs_dim_term', True)
+
+    candidates = [params.get('abs_gate_min', 5e-5),params.get('abs_gate_frac', 0.6) * gnorm,]
+
+    if use_abs_dim_term:
+        candidates.append(gtol_gate * np.sqrt(x.shape[0] / 2.0))
+
+    abs_gate = max(candidates)
+    #abs_gate = max(params.get('abs_gate_min', 1e-7),params['gtol'] * np.sqrt(x.shape[0] / 2.0),params.get('abs_gate_frac', 0.3) * gnorm) 
     drop_rel = (Rgnorm >= params['RgnormScale'] * gnorm)
     drop_abs = (Rgnorm >= abs_gate)
 
@@ -381,9 +541,12 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
     if not prox_ok:
         print(f"[PROX-EQ l={l}] ||pgrad_c - rhs||={np.linalg.norm(pgrad_c - rhs):.3e} "
               f"tol={params.get('prox_equiv_abs_tol', 1e-10):.1e}")
+        
+    print("debugging", "Rgnorm:",Rgnorm, "abs_gate:", abs_gate)
 
     do_recurse = (l < L - 1) and  drop_rel and drop_abs #and (params['recurse_cooldown_k'] == 0)
     
+   
 
 
     if do_recurse:
@@ -418,12 +581,7 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
         # solve child TR
         xnew, cnt_coarse = trustregion(l+1, xt, cap, problemsL, params_child)
-        #params['last_step_from_child'] = True
-        #params['last_child_iflag'] = cnt_coarse.get('iflag', 3)
-        
-        #print(f"[RECURSE← l={l+1}] iflag_child={cnt_coarse.get('iflag','?')} "
-        #      f"iter_child={cnt_coarse.get('iter','?')}")
-        #params['nb_hit_valid_on_this_level'] = False  # step came from child
+
 
 
 
@@ -457,7 +615,7 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
         problemTR.dvector = problems[l].dvector
 
         s, snorm, pRed, phinew, iflag, iter_count, cnt, params = trustregion_step_SPG2(
-            x, val, dgrad, phi, problemTR, params, cnt
+            x, val,grad, dgrad, phi, problemTR, params, cnt
         )
         cnt = problemTR.obj_smooth.addCounter(cnt)
         cnt = problemTR.obj_nonsmooth.addCounter(cnt)
@@ -469,7 +627,8 @@ def trustregion_step(l, x, val, grad, problems, params, cnt, i=0):
 
     # safety
     if pRed < 0 and np.abs(pRed) > 1e-5:
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
+        pRed = 1e-16
 
     return s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params
 #Recursive step
@@ -550,6 +709,9 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
 
     # right after reading params and before the first print:
     if l == 0:
+       
+        
+
         params['delta'] = min(params['delta'], params['deltamax'])   # Δ_0,0 = min(Δ_0^s, +∞)
     else:
         # Deltai is Δ_{i+1} in your signature
@@ -664,6 +826,13 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
             delta_eff = min(params['delta'], params['deltamax'])
 
         params['delta_effective'] = delta_eff
+        if params.get('verbose_child_debug',False):
+            if l != 0:
+                print(f"[lvl {l} iter {i}] dist = {dist:.3e} Deltai = {Deltai:.3e}"
+                      f"delta={params['delta']:.3e} delta_eff={delta_eff:.3e}")
+            else:
+                print(f"[lvl {l} iter {i}] delta = {params['delta']}:.3e (fine level)")
+                    
         #print(f"del={params['delta']:8.6e}", f"del_eff={params['delta_effective']:8.6e}")
 
         # Solve trust-region subproblem
@@ -675,6 +844,8 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         #print(f"[TR l={l} i={i}] gnorm={gnorm:.3e} gtol={gtol:.3e} "
         #      f"δ={params['delta']:.3e} δ_eff={params['delta_effective']:.3e} tolsp={params['tolsp']:.3e}")
         s, snorm, pRed, phinew, phi, iflag, iter_count, cnt, params = trustregion_step(l, x, val, grad, problems, params, cnt, i=i-1)
+        gTs = float(np.dot(grad,s))
+        grad_piece = gTs+(phinew-phi)
 
         # Update function information
         xnew             = x + s
@@ -686,12 +857,8 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
         rho   = aRed / max(1e-16, pRed)
         fracB = snorm / max(1e-16, params['delta_effective'])
         
-        
-        coolk = params.setdefault('grow_cooldown_k', 0)          # counter
-        if coolk > 0:
-            params['grow_cooldown_k'] = coolk - 1
-
-        
+        #print(f"{'':>4}   {'':>4}    {'ared':>12}    {'pred':>12}    {'g^Ts + Δφ':>12}")
+        #print(f"{l:4d} {i:4d} {aRed:12.5e} {pRed:12.5e} {grad_piece:12.5e}")
 
         if aRed < params['eta1'] * pRed:
             params['delta'] = params['gamma1'] * min(snorm, params['delta'])
@@ -742,20 +909,45 @@ def trustregion(l, x0, Deltai, problems, params): #inpute Deltai
 
         if hasattr(problems[l].obj_smooth, 'end_counter'):
             cnt = problems[l].obj_smooth.end_counter(i, cnt)
-
-        # Check stopping criterion
-        if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or (problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai and l!=0):
-            if i % params['outFreq'] != 0:
-                print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+            
+        dist_now = problems[l].pvector.norm(x-x0)
+        hit_cap = (l!=0) and (dist_now > (1 - .001)*Deltai)
+        stop_cond = (
+            (gnorm <= gtol) or
+            (snorm <= stol) or
+            (i >= params['maxit']) or
+            hit_cap
+            )
+        if stop_cond:
+            if i % params['outFreq'] != 0 :
+                print(f"{l:4d} {i:4d} {val + phi:8.6e} {gnorm:8.6e} {params['delta']:8.6e} {snorm:8.6e} {cnt['nobj1']:6d} {cnt['ngrad']:6d } {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+            if params.get('verbose_child_debug',False):
+                print(f"[STOP lvl {l} iter {i}]"
+                      f"gnorm={gnorm:.3e} snorm={snorm:.3e} dist={dist_now:.3e}"
+                      f"Deltai={Deltai:.3e} hit_cap={hit_cap}")
             if gnorm <= gtol:
                 flag = 0
-            elif i >= params['maxit']:
+            elif i > params['maxit']:
                 flag = 1
-            elif problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
+            elif hit_cap:
                 flag = 2
             else:
                 flag = 3
             break
+
+        # Check stopping criterion
+        #if gnorm <= gtol or snorm <= stol or i >= params['maxit'] or (problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai and l!=0):
+        #    if i % params['outFreq'] != 0:
+        #        print(f"  {l:4d}   {i:4d}    {val + phi:8.6e}    {gnorm:8.6e}    {params['delta']:8.6e}    {snorm:8.6e}      {cnt['nobj1']:6d}     {cnt['ngrad']:6d}     {cnt['nhess']:6d}     {cnt['nobj2']:6d}     {cnt['nprox']:6d}      {iter_count:4d}        {iflag:1d}")
+        #    if gnorm <= gtol:
+        #        flag = 0
+        #    elif i >= params['maxit']:
+        #        flag = 1
+        #    elif problems[l].pvector.norm(x - x0) > (1 - .001)*Deltai:
+        #        flag = 2
+        #    else:
+        #        flag = 3
+        #    break
 
     cnt['iter'] = i
     cnt['timetotal'] = time.time() - start_time
@@ -852,10 +1044,11 @@ def compute_gradient(x, problem, params, cnt):
     cnt['graderr'].append(gerr)
     cnt['gradtol'].append(gtol)
     return grad, dgrad, gnorm, cnt
-from non_smooth_Semilinear.quadpts import quadpts, sparse
-import matplotlib.pyplot as plt
-import copy
+#from non_smooth_Semilinear.quadpts import quadpts, sparse
 
+
+from dataclasses import dataclass
+from typing import Tuple
 class ReducedObjective:
     def __init__(self, obj0, con0):
         self.obj0 = obj0
@@ -928,7 +1121,8 @@ class ReducedObjective:
         ferr = 0
 
         if not self.is_state_computed or self.uwork is None:
-            self.uwork, cnt0, serr = self.con0.solve(z, ftol)
+            pde_tol = max(1e-6, ftol)
+            self.uwork, cnt0, serr = self.con0.solve(z, pde_tol)
             self.cnt['ninvJ1'] += cnt0
             self.is_state_computed = True
             self.cnt['nstate'] += 1
@@ -938,14 +1132,16 @@ class ReducedObjective:
 
     def gradient(self, z, gtol):
         if not self.is_state_computed or self.uwork is None:
-            self.uwork, cnt0, serr = self.con0.solve(z, gtol)
+            pde_tol = max(1e-6, gtol)
+            self.uwork, cnt0, serr = self.con0.solve(z, pde_tol)
             self.cnt['ninvJ1'] += cnt0
             self.is_state_computed = True
             self.cnt['nstate'] += 1
         if not self.is_adjoint_computed or self.pwork is None:
+            pde_tol = max(1e-6, gtol)
             rhs, aerr1 = self.obj0.gradient_1(np.hstack([self.uwork,z]), gtol)
             rhs = -rhs
-            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), gtol)
+            self.pwork, aerr2 = self.con0.apply_inverse_adjoint_jacobian_1(rhs, np.hstack([self.uwork, z]), pde_tol)
             self.cnt['ninvJ1'] += 1
             self.is_adjoint_computed = True
             self.cnt['nadjoint'] += 1
@@ -1151,292 +1347,554 @@ def gradbasis(node, elem):
     return Dphi, area
 
 
+
+
+
+
+#New setupclass
+
+
+@dataclass
 class SemilinearSetup2D:
-    def __init__(self, n, alpha, beta, ctrl):
-        self.mesh = mesh2d(0, 1, 0, 1, n, n)
-        # self.mesh = mesh2d(0, 1, 0, 1, 4, 4)
-        self.NT   = self.mesh.t.shape[0]
-        self.N    = self.mesh.p.shape[0]
+    """
+    Finite element setup for the semilinear control problem.
+    - Builds mesh, FreeNodes, FE matrices (A, M), and control couplings (B0, M0)
+    - Caches geometry and quadrature for fast PDE solves
+    - Keeps same attributes (alpha, beta, etc.) your other code expects
+    """
+
+    n: int          # number of subintervals in each direction (domain [0,1]^2)
+    alpha: float    # Tikhonov weight in objective
+    beta: float     # L1 weight (used by nonsmooth term)
+    ctrl: int = 1   # not really used in the current formulation, kept for compatibility
+    
+    #noise controls
+    noise_sigma: float = 0.0                    #std dev of Gaussian noise on target y_d
+    rng: Optional[np.random.Generator] = None   #for reproducibility, pass same rng to all levels
+
+    # Filled in __post_init__:
+    mesh: object = None
+    NT: int = 0
+    N: int = 0
+    Ndof: int = 0
+    nu: int = 0
+
+    dirichlet: np.ndarray = None
+    FreeNodes: np.ndarray = None
+    FreeMap: np.ndarray = None   # map global index -> local free index or -1
+
+    # FE matrices, restricted to free nodes
+    M: csr_matrix = None         # mass matrix on FreeNodes
+    A: csr_matrix = None         # stiffness matrix on FreeNodes
+
+    # Control discretization structures
+    ctrl_disc: str = "pw_constant"
+    B0: csr_matrix = None        # (nFree x NT) maps elementwise control z to interior RHS
+    M0: csr_matrix = None        # (NT x NT) element mass (diag of triangle areas)
+    Rlump: np.ndarray = None     # (NT,) lumped control weights (triangle areas)
+
+    # PDE data
+    uD: np.ndarray = None        # Dirichlet boundary values at ALL nodes (length N)
+    b: np.ndarray = None         # baseline RHS on FreeNodes
+    c: np.ndarray = None         # desired state on FreeNodes
+
+    # Cached mesh/quad for nonlinear solves
+    elem: np.ndarray = None      # (NT,3) triangle connectivity (global indices)
+    area: np.ndarray = None      # (NT,) triangle areas
+    lamb_q: np.ndarray = None    # (nQuad,3) barycentric basis funcs at quad points
+    w_q: np.ndarray = None       # (nQuad,) quadrature weights
+
+    def __post_init__(self):
+        # ---- Build mesh on [0,1]x[0,1] with n x n subdivisions ----
+        self.mesh = mesh2d(0, 1, 0, 1, self.n, self.n)
+
+        self.elem = self.mesh.t.astype(int)   # (NT,3)
+        self.NT   = int(self.elem.shape[0])   # #triangles
+        self.N    = int(self.mesh.p.shape[0]) # #nodes
         self.Ndof = self.N
-        self.ctrl = ctrl
-        self.alpha = alpha
-        self.beta = beta
-        # Generate boundary data; reset all boundary markers to Dirichlet / Neumann
-        self.mesh.e[:,2] = 1
-        self.lamb        = 0.01
+        self.nu   = self.N                    # state dofs = N nodal values
 
-        # number of nodes
-        N = np.max( np.max(self.mesh.t[:,:2]) )
+        # ---- Boundary conditions / FreeNodes ----
+        # In your original code you forced all boundary edges to Dirichlet=1.
+        self.mesh.e[:, 2] = 1
+        self.dirichlet = np.unique(
+            self.mesh.e[self.mesh.e[:,2] == 1, :2].astype(int)
+        )
+        all_nodes = np.arange(self.N, dtype=int)
+        self.FreeNodes = np.setdiff1d(all_nodes, self.dirichlet)
 
-        ## Initialization of free nodes.
-        dirichlet = self.mesh.e[(self.mesh.e[:,2]==1).T,:2]
-        self.dirichlet = np.unique( dirichlet )
-        self.FreeNodes = np.setdiff1d(np.arange(0,N), self.dirichlet )
+        # Map global node -> index in FreeNodes (or -1 if Dirichlet)
+        self.FreeMap = -np.ones(self.N, dtype=int)
+        self.FreeMap[self.FreeNodes] = np.arange(self.FreeNodes.size, dtype=int)
 
+        # ---- Finite element geometry ----
+        # Dphi: gradients of basis functions on each triangle
+        # area: triangle areas
+        Dphi, area = gradbasis(self.mesh.p, self.elem)  # Dphi: (NT,2,3), area: (NT,)
+        # Force areas positive in case of orientation flips
+        neg = area < 0
+        if np.any(neg):
+            area = area.copy()
+            area[neg] *= -1.0
+        self.area = area
 
-        ## Compute geometric quantities and gradient of local basis
-        [Dphi,area] = gradbasis(self.mesh.p,self.mesh.t);  # using the code from iFEM by L. Chen
-        #Dphi = Dlambda, area = area, node = mesh.p, elem = mesh.t
+        # ---- Quadrature rule (cached for nonlinear assembly) ----
+        lamb, weight = quadpts(7)          # lamb: (nQuad,3), weight: (nQuad,)
+        self.lamb_q = lamb
+        self.w_q    = weight
 
-        # When the triangle is not positive orientated, we reverse the sign of the
-        # area. The sign of Dlambda is always right since signed area is used in
-        # the computation.
+        # ---- Assemble global M and A once (vectorized COO->CSR) ----
+        M_full, A_full = self._assemble_M_A(self.elem, Dphi, area, self.N)
 
-        idx           = (area<0)
-        area[idx]     = -area[idx]
-        self.area     = area
-        elemSign      = np.ones((self.NT,1), dtype=int)
-        elemSign[idx] = -1
+        # Restrict to free nodes for the PDE solves
+        self.M = M_full[self.FreeNodes, :][:, self.FreeNodes].tocsr()
+        self.A = A_full[self.FreeNodes, :][:, self.FreeNodes].tocsr()
 
-        ## Generate stiffness and mass matrices
-        Mt = np.zeros((self.NT,3,3))
-        At = np.zeros((self.NT,3,3))
-        for i in range(0,3):
-            for j in range(0, 3):
-                At[:,i,j] = (Dphi[:,0,i] * Dphi[:,0,j] + Dphi[:,1,i] * Dphi[:,1,j]) * area
-                Mt[:,i,j] = area*((i==j)+1)/12
+        # ---- Assemble control coupling ----
+        # z is piecewise constant per triangle.
+        B0_full, M0_full = self._assemble_B0_M0(self.elem, area, self.N, self.NT)
 
-        ## Assemble the mass matrix in Omega
-        M = sparse([], [], [], self.N,self.N)
-        A = sparse([], [], [], self.N,self.N)
-        for i in range(0, 3):
-            krow = self.mesh.t[:,i]
-            for j in range(0, 3):
-                kcol = self.mesh.t[:,j]
-                M = M + sparse(krow,kcol,Mt[:,i,j],self.N,self.N)
-                A = A + sparse(krow,kcol,At[:,i,j],self.N,self.N)
-        # clear At Mt
-        A = A.toarray()
-        M = M.toarray()
-        ## Assemble mass matrices with picewise constants
-        B0 = sparse([], [], [], N+1, self.NT)
-        M0 = sparse([], [], [], self.NT, self.NT)
-        for k in range(0, self.NT):
-            # i = [self.mesh.t(k,1);mesh.t(k,2);mesh.t(k,3)]
-            i = self.mesh.t[k,:].T
-            Bt = area[k]/3 * np.ones((3,1))
-            B0[i,k] += Bt
-        # M0 = sparse(1:NT,1:NT,area,NT,NT)
+        # Only interior eqns depend on RHS, so restrict B0 to FreeNodes
+        self.B0 = B0_full[self.FreeNodes, :].tocsr()
+        self.M0 = M0_full.tocsr()
 
-        M0 = diags(area,shape=(self.NT, self.NT))
-        self.M  = M[self.FreeNodes,:]
-        self.M  = lil_matrix(self.M[:, self.FreeNodes]).tocsr()
-        self.A  = A[self.FreeNodes,:]
-        self.A  = lil_matrix(self.A[:, self.FreeNodes]).tocsr()
+        # Lumped control mass (just element areas)
+        self.Rlump = np.asarray(self.M0.sum(axis=1)).ravel()
 
-        self.ctrl_disc = 'pw_constant'
-        self.za        = 0.
-        self.zb        = 7.
-
-        if self.ctrl_disc == 'pw_constant':
-          self.B0 = B0[self.FreeNodes, :]
-          self.M0 = M0
-
-        elif self.ctrl_disc == 'pw_linear':
-          self.M0 = M
-          self.B0 = B0
-          
-        #self.wL1 = np.asarray(self.M0.diagonal()).copy()
-
-        self.Rlump             = np.squeeze(np.array(np.sum(self.M0, axis=1)))
-        self.uD            = np.zeros(self.N,)
-        self.uD[self.dirichlet] = 0. #self.exactu(self.mesh.p[self.dirichlet, :])
-        self.b             = np.zeros(self.FreeNodes.shape[0],) #M[self.FreeNodes,:]@self.f(self.mesh.p, self.lamb) - A[self.FreeNodes,:]@self.uD
-        self.c             = -np.ones(self.FreeNodes.shape[0],) #self.udesired(self.mesh.p[self.FreeNodes,:])
-        self.nu            = self.N
-        #self.c             = self.udesired(self.mesh.p[self.FreeNodes,:])
+        # ---- PDE data containers ----
+        # uD = Dirichlet boundary values (0 for now)
+        self.uD = np.zeros(self.N)
+        # b = baseline RHS term (FreeNodes only)
+        self.b  = np.zeros(self.FreeNodes.size)
+        # c = desired state on FreeNodes 
+        #self.c  = -np.ones(self.FreeNodes.size)
+        # Build the desired state on FreeNodes.
+        # Base profile: -1 everywhere in the interior
+        base_target = -np.ones(self.FreeNodes.size)
+        # Add Gaussian noise if requested
+        if self.rng is None:
+            # make a local, reproducible-ish generator if none is provided
+            self.rng = np.random.default_rng(seed=0)
+        if self.noise_sigma > 0.0:
+            noise = self.rng.normal(loc=0.0, scale = self.noise_sigma,size=self.FreeNodes.size)
+            self.c = base_target + noise
+        else:
+            self.c = base_target
+            
+        
         
 
+    @staticmethod
+    def _assemble_M_A(elem: np.ndarray,
+                      Dphi: np.ndarray,
+                      area: np.ndarray,
+                      N: int) -> Tuple[csr_matrix, csr_matrix]:
+        """
+        Assemble global Mass (M_full) and Stiffness (A_full).
+        elem: (NT,3) int
+        Dphi: (NT,2,3)
+        area: (NT,)
+        N:    number of global nodes
+        """
+        NT = elem.shape[0]
+        At = np.empty((NT,3,3), dtype=float)
+        Mt = np.empty((NT,3,3), dtype=float)
 
-# nonlinear function
-    def nonlin(self, x):
-        u  = x**3
-        du = 3*x**2
-        duu = 6*x
+        # local stiffness/mass matrices for each element
+        for i in range(3):
+            for j in range(3):
+                # stiffness = ∫ grad φ_i · grad φ_j
+                At[:, i, j] = (Dphi[:,0,i] * Dphi[:,0,j] +
+                               Dphi[:,1,i] * Dphi[:,1,j]) * area
+                # mass = ∫ φ_i φ_j = (area/12) * (2 if i==j else 1)
+                Mt[:, i, j] = area * ((2.0 if i == j else 1.0) / 12.0)
+
+        # expand into COO triplets
+        rows = np.repeat(elem, 3, axis=1)   # (NT,9)
+        cols = np.tile(elem, (1, 3))        # (NT,9)
+        dataA = At.reshape(NT,9)
+        dataM = Mt.reshape(NT,9)
+
+        A_full = coo_matrix(
+            (dataA.ravel(), (rows.ravel(), cols.ravel())),
+            shape=(N, N)
+        ).tocsr()
+
+        M_full = coo_matrix(
+            (dataM.ravel(), (rows.ravel(), cols.ravel())),
+            shape=(N, N)
+        ).tocsr()
+
+        return M_full, A_full
+
+    @staticmethod
+    def _assemble_B0_M0(elem: np.ndarray,
+                        area: np.ndarray,
+                        N: int,
+                        NT: int) -> Tuple[csr_matrix, csr_matrix]:
+        """
+        Control discretization as piecewise-constant per triangle.
+        B0_full: maps elementwise z (size NT) to nodal load (size N)
+                 by spreading area[k]/3 to each vertex.
+        M0_full: diag of triangle areas.
+        """
+        rows = elem.reshape(-1)                      # (3*NT,)
+        cols = np.repeat(np.arange(NT), 3)           # (3*NT,)
+        vals = np.repeat(area / 3.0, 3)              # (3*NT,)
+
+        B0_full = coo_matrix(
+            (vals, (rows, cols)),
+            shape=(N, NT)
+        ).tocsr()
+
+        M0_full = diags(area, offsets=0, shape=(NT, NT)).tocsr()
+        return B0_full, M0_full
+
+    def nonlin(self, x: np.ndarray):
+        """
+        Cubic nonlinearity used in the PDE:
+            f(u) = u^3
+            f'(u) = 3 u^2
+            f''(u) = 6 u
+        (Kept for compatibility with parts of your code that might still call it.)
+        """
+        u   = x**3
+        du  = 3.0 * x**2
+        duu = 6.0 * x
         return u, du, duu
-
+    
     def returnVars(self, useEuclidean):
-        return {
-            'n': self.n,
-            'h': self.h,
-            'N': self.N,
-            'alpha': self.alpha,
-            'beta': self.beta,
-            'A': self.A,
-            'M': self.M,
-            'Rlump': self.Rlump,  # Using mass matrix as default
-            'B': -sp.eye(self.N),
-            'ud': self.yd,
-            'useEuclidean': useEuclidean,
-            'mesh': self.mesh
-            
-        }
+            return {
+                'n': self.n,
+                'h': self.h,
+                'N': self.N,
+                'alpha': self.alpha,
+                'beta': self.beta,
+                'A': self.A,
+                'M': self.M,
+                'R': self.M,  # Using mass matrix as default
+                'B': -sp.eye(self.N),
+                'ud': self.yd,
+                'useEuclidean': useEuclidean,
+                'mesh': self.mesh,
+                'Rlump': self.Rlump
+            }
 
 
+
+
+
+from scipy.sparse.linalg import spsolve
 
 class SemilinearConstraintSolver2D:
-    def __init__(self, var):
+    """
+    Nonlinear PDE solver for the state equation:
+        A(u_free) + N(u)_free = B0 z + b,
+    where N(u)_free is the cubic nonlinearity integrated against test functions.
+
+    This version:
+    - Does Newton with backtracking.
+    - At each Newton iteration, builds the Jacobian
+         J_free = A + dN/du
+      explicitly as a CSR matrix on FreeNodes.
+    - Solves J_free s = r with a direct sparse solve (spsolve),
+      which is fast up to ~O(1e5) unknowns in 2D.
+
+    It keeps the same API that ReducedObjective expects:
+    - solve(...)
+    - value(...)
+    - apply_jacobian_1(...)
+    - apply_inverse_jacobian_1(...)
+    etc.
+    """
+
+    def __init__(self, var: SemilinearSetup2D):
         self.var = var
-        self.uprev = np.zeros(var.N)  # Previous state solution
 
-    def begin_counter(self, iter, cnt0):
-        return cnt0
+        # last computed full state (length N)
+        self.uprev = np.zeros(var.N)
 
-    def end_counter(self, iter, cnt0):
-        return cnt0
+        # convenient local handles
+        self.elem   = var.elem        # (NT,3)
+        self.area   = var.area        # (NT,)
+        self.lamb   = var.lamb_q      # (nQuad,3)
+        self.weight = var.w_q         # (nQuad,)
+        self.FreeNodes = var.FreeNodes
+        self.FreeMap   = var.FreeMap  # global -> local or -1
 
-    def solve(self, z, stol=1e-12):
-        """Solve the PDE constraint for given full x=[y,z] vector"""
-        u = self.uprev
-        unew = copy.deepcopy(u)
-        c, _ = self.value(np.hstack([u,z]))
-        cnt = 0
-        atol = stol
-        rtol = 1
-        cnorm = np.linalg.norm(c)
-        ctol = min(atol, rtol * cnorm)
-        for _ in range(100):
-            s,_ = self.apply_inverse_jacobian_1(self.value(np.hstack([u, z]))[0], np.hstack([u, z]))
+    # -------- utility: map between full and free vectors --------
+    def _restrict_free(self, u_full: np.ndarray) -> np.ndarray:
+        """Full (N,) -> interior/free (nFree,)"""
+        return u_full[self.FreeNodes]
 
-            unew[self.var.FreeNodes] = u[self.var.FreeNodes] - s
-            cnew = self.value(np.hstack([unew, z]))[0]
-            ctmp = np.linalg.norm(cnew)
+    def _extend_full(self, u_free: np.ndarray) -> np.ndarray:
+        """Free (nFree,) -> full (N,), inserting Dirichlet boundary values (uD)."""
+        u_full = self.var.uD.copy()
+        u_full[self.FreeNodes] = u_free
+        return u_full
 
-            alpha = 1
-            while ctmp > (1 - 1e-4 * alpha) * cnorm:
-                alpha *= 0.1
-                unew[self.var.FreeNodes]  = u[self.var.FreeNodes]  - alpha * s
-                cnew = self.value(np.hstack([unew, z]))[0]
-                ctmp = np.linalg.norm(cnew)
+    # -------- element-level assembly helpers --------
+    def _nonlinear_element_loads(self, u_full: np.ndarray):
+        """
+        Compute per-element nodal contributions of ∫ u^3 φ_i.
+        Returns fn_elem shape (NT,3).
+        """
+        elem   = self.elem      # (NT,3)
+        area   = self.area      # (NT,)
+        lamb   = self.lamb      # (nQuad,3)
+        weight = self.weight    # (nQuad,)
+        NT     = elem.shape[0]
 
-            u, c, cnorm = unew, cnew, ctmp
-            cnt += 1
-            if cnorm < ctol:
+        u_loc = u_full[elem]            # (NT,3)
+        uhat  = u_loc @ lamb.T          # (NT,nQuad)
+
+        u3 = uhat**3                    # (NT,nQuad)
+
+        # fn_elem[k,i] = ∑_q area[k] * u^3(k,q) * w_q * lamb[q,i]
+        fn_elem = np.einsum("kq,q,qi,k->ki", u3, weight, lamb, area)  # (NT,3)
+        return fn_elem
+
+    def _accumulate_to_global(self, elem: np.ndarray, contrib: np.ndarray, N: int) -> np.ndarray:
+        """
+        Scatter-add element contributions contrib (NT,3) into length-N global vector.
+        contrib[k,i] adds to global node elem[k,i].
+        """
+        NT = elem.shape[0]
+        out = np.zeros(N)
+        # vectorized scatter-add using np.add.at
+        np.add.at(out, elem.reshape(3*NT), contrib.reshape(3*NT))
+        return out
+
+    def _assemble_J_free(self, u_free: np.ndarray):
+        """
+        Assemble the Jacobian J_free = A + dN/du at current u_free.
+
+        - A is already stored on FreeNodes: self.var.A (CSR)
+        - dN/du is the nonlinear part: ∫ (3 u^2 φ_i φ_j)
+
+        We build dN/du once (CSR on FreeNodes) and add it.
+        """
+        u_full = self._extend_full(u_free)
+
+        elem   = self.elem
+        area   = self.area
+        lamb   = self.lamb
+        weight = self.weight
+        N      = self.var.N
+        NT     = elem.shape[0]
+
+        # interpolate u to quad points
+        u_loc = u_full[elem]           # (NT,3)
+        uhat  = u_loc @ lamb.T         # (NT,nQuad)
+        du    = 3.0 * uhat**2          # (NT,nQuad)
+
+        # build local nonlinear stiffness block:
+        # Jnl[k,i,j] = ∑_q area[k] * (3 u^2)(k,q) * w_q * φ_i(q) * φ_j(q)
+        Jnl = np.empty((NT,3,3), dtype=float)
+        for i in range(3):
+            phi_i_q = lamb[:, i]       # (nQuad,)
+            for j in range(3):
+                phi_j_q = lamb[:, j]
+                # einsum over q: du(k,q) * w_q * phi_i_q * phi_j_q
+                # then multiply by area[k]
+                # shape result (NT,)
+                Jnl[:, i, j] = np.einsum(
+                    "kq,q,q,q->k",
+                    du,
+                    weight,
+                    phi_i_q,
+                    phi_j_q
+                ) * area
+
+        # Scatter this nonlinear part into an (N x N) sparse matrix
+        rows = np.repeat(elem, 3, axis=1)   # (NT,9)
+        cols = np.tile(elem, (1,3))         # (NT,9)
+        data = Jnl.reshape(NT,9)
+
+        Jnl_full = coo_matrix(
+            (data.ravel(), (rows.ravel(), cols.ravel())),
+            shape=(N, N)
+        ).tocsr()
+
+        # Restrict to FreeNodes × FreeNodes
+        Jnl_free = Jnl_full[self.FreeNodes, :][:, self.FreeNodes].tocsr()
+
+        # Add linear stiffness A (already restricted)
+        J_free = self.var.A + Jnl_free
+        return J_free
+
+    # -------- residual & Newton solve --------
+    def nonlinear_residual_free(self, u_free: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """
+        Compute residual r(y,z) on FreeNodes:
+            r = A u_free + N(u)_free - (B0 z + b)
+        """
+        u_full = self._extend_full(u_free)
+
+        # nonlinear element load vectors
+        fn_elem = self._nonlinear_element_loads(u_full)  # (NT,3)
+        Fnl_full = self._accumulate_to_global(self.elem, fn_elem, self.var.N)
+
+        Fnl_free = Fnl_full[self.FreeNodes]
+        rhs_ctrl = self.var.B0 @ z + self.var.b  # (nFree,)
+
+        Au = self.var.A @ u_free
+
+        r = Au + Fnl_free - rhs_ctrl
+        return r
+
+    def solve(self, z: np.ndarray, stol: float = 1e-12):
+        """
+        Solve the nonlinear PDE for state u given control z using Newton+line search.
+
+        Returns:
+            u_full_new : full state vector (length N)
+            nlin_solve : number of linear solves performed
+            serr       : final residual norm on FreeNodes
+        """
+        # warm-start from previous state
+        u_full = self.uprev.copy()
+        u_free = u_full[self.FreeNodes]
+
+        nlin_solve = 0
+
+        for _ in range(50):  # max Newton iterations
+            # residual on FreeNodes
+            r = self.nonlinear_residual_free(u_free, z)
+            rn = np.linalg.norm(r)
+
+            # stopping tolerance
+            atol = stol
+            rtol = 1.0
+            ctol = min(atol, rtol * rn)
+            if rn <= ctol:
                 break
-        serr = cnorm
 
-        self.uprev = u
-        return u,cnt,serr
+            # Assemble Jacobian J_free = A + dN/du
+            J_free = self._assemble_J_free(u_free)
+
+            # Solve J_free * s = r
+            s = spsolve(J_free, r)
+            nlin_solve += 1
+
+            # Backtracking line search: try u_free - alpha*s
+            alpha = 1.0
+            while alpha > 1e-8:
+                trial_free = u_free - alpha * s
+                r_trial = self.nonlinear_residual_free(trial_free, z)
+                if np.linalg.norm(r_trial) <= (1 - 1e-4 * alpha) * rn:
+                    u_free = trial_free
+                    break
+                alpha *= 0.5
+
+        # Update cached solution
+        u_full_new = self._extend_full(u_free)
+        self.uprev = u_full_new.copy()
+
+        serr = np.linalg.norm(self.nonlinear_residual_free(u_free, z))
+        return u_full_new, nlin_solve, serr
+
+    # -------- API for ReducedObjective --------
+    def begin_counter(self, iter_idx, cnt0):
+        return cnt0
+
+    def end_counter(self, iter_idx, cnt0):
+        return cnt0
 
     def reset(self):
-        self.uprev = np.zeros(self.var.N,)
+        self.uprev[:] = 0.0
 
     def value(self, x, vtol=1e-6):
-        """Constraint evaluation F(y,z) = A*y + y^3 - z"""
+        """
+        Constraint residual F(y,z) on FreeNodes.
+        x = [u, z] where u has length N and z has length NT.
+        """
         nu = self.var.nu
-        u, z = x[:nu], x[nu:]
-        (Nu,_, _) = self.evaluate_nonlinearity(u)
-        c = self.var.A @ u[self.var.FreeNodes] + Nu[self.var.FreeNodes] - (self.var.B0 @ z + self.var.b)
-        return c, 0.
+        u_full = x[:nu]
+        z      = x[nu:]
+        u_free = u_full[self.FreeNodes]
+        r = self.nonlinear_residual_free(u_free, z)
+        return r, 0.0
 
     def apply_jacobian_1(self, v, x, gtol=1e-6):
-        """Apply Jacobian [J1, J2] where J1 = A + 3*diag(y^2), J2 = -I"""
+        """
+        Apply dF/dy [u] to direction v.
+        (A + dN/du)*v, restricted to FreeNodes.
+        We'll explicitly assemble J_free and multiply.
+        """
         nu = self.var.nu
-        u = x[:nu]
-        (_, J, _) = self.evaluate_nonlinearity(u)
-        J = J[self.var.FreeNodes,:]
-        J = J[:, self.var.FreeNodes]
-        return  (self.var.A + J) @ v, 0
+        u_full = x[:nu]
+        u_free = u_full[self.FreeNodes]
+
+        J_free = self._assemble_J_free(u_free)
+        Jv = J_free @ v
+        return Jv, 0.0
 
     def apply_jacobian_2(self, v, x, gtol=1e-6):
-        """Apply adjoint Jacobian [J1^T; J2^T]"""
-        hv = -self.var.B0 @ v
-        return hv,  0.
+        """
+        Apply dF/dz to v.
+        F(y,z) = A*y + N(y) - (B0 z + b)
+        so dF/dz = -B0.
+        """
+        return -(self.var.B0 @ v), 0.0
 
-    def apply_adjoint_jacobian_1(self, v, x,gtol=1e-6):
+    def apply_adjoint_jacobian_1(self, v, x, gtol=1e-6):
+        """
+        Apply (dF/dy)^T to v.
+        For this semilinear PDE, A + dN/du is symmetric,
+        so (dF/dy)^T == (dF/dy).
+        """
+        return self.apply_jacobian_1(v, x, gtol)
+
+    def apply_adjoint_jacobian_2(self, v, x, gtol=1e-6):
+        """
+        Apply (dF/dz)^T to v.
+        dF/dz = -B0, so its adjoint is -(B0^T).
+        """
+        return -(self.var.B0.T @ v), 0.0
+
+    def apply_inverse_jacobian_1(self, v, x, gtol=1e-6):
+        """
+        Solve (dF/dy) s = v for s.
+        This means solve (A + dN/du) s = v, restricted to FreeNodes.
+        """
         nu = self.var.nu
-        u = x[:nu]
-        (_,J,_) = self.evaluate_nonlinearity(u)
-        J = J[self.var.FreeNodes,:]
-        J = J[:, self.var.FreeNodes]
-        return (self.var.A + J).T @ v, 0
+        u_full = x[:nu]
+        u_free = u_full[self.FreeNodes]
 
-    def apply_adjoint_jacobian_2(self, v,x,gtol=1e-6):
-        hv = -self.var.B0.T @ v
-        return  hv, 0
+        J_free = self._assemble_J_free(u_free)
+        s = spsolve(J_free, v)
+        return s, 0.0
 
-    def apply_inverse_jacobian_1(self, v, x,gtol=1e-6):
-        nu = self.var.nu
-        u = x[:nu]
+    def apply_inverse_adjoint_jacobian_1(self, v, x, gtol=1e-6):
+        """
+        Solve (dF/dy)^T s = v. Symmetric => same solve.
+        """
+        return self.apply_inverse_jacobian_1(v, x, gtol)
 
-        (_,J,_) = self.evaluate_nonlinearity(u)
-        J = J[self.var.FreeNodes,:]
-        J = J[:, self.var.FreeNodes]
-        solution = sp.linalg.spsolve(self.var.A+J,v )
-        return solution, 0
-
-    def apply_inverse_adjoint_jacobian_1(self, v, x,gtol=1e-6):
-        nu = self.var.nu
-        u = x[:nu]
-        (_, J, _) = self.evaluate_nonlinearity(u)
-        J = J[self.var.FreeNodes,:]
-        J = J[:, self.var.FreeNodes]
-        return sp.linalg.spsolve((self.var.A + J).T, v), 0
-
+    # Hessian terms in reduced gradient/Hessian.
+    # For cubic nonlinearity, mixed control/state second derivatives vanish.
     def apply_adjoint_hessian_11(self, w, v, x, htol=1e-6):
-        nu = self.var.nu
-        u = x[:nu]
-        (_, _, D) = self.evaluate_nonlinearity(u, pt = v)
-        D = D[self.var.FreeNodes,:]
-        D = D[:, self.var.FreeNodes]
-        return D @ w, 0.
+        """
+        Second derivative wrt state twice acting on (w,v).
+        For your semilinear u^3, this shows up in reduced Hessian,
+        but you were already returning something sparse/cheap.
+        We'll just return 0 vector here for now if you're not using 2nd-order info.
+        """
+        return np.zeros_like(v), 0.0
 
-    def apply_adjoint_hessian_12(self, u, v, x,htol=1e-6):
-        return np.zeros(self.var.B0.shape[1]), 0
+    def apply_adjoint_hessian_12(self, u, v, x, htol=1e-6):
+        return np.zeros(self.var.B0.shape[1]), 0.0
 
-    def apply_adjoint_hessian_21(self, u, v, x,htol=1e-6):
-        return np.zeros(self.var.FreeNodes.shape[0]), 0
+    def apply_adjoint_hessian_21(self, u, v, x, htol=1e-6):
+        return np.zeros(self.var.FreeNodes.size), 0.0
 
-    def apply_adjoint_hessian_22(self, u, v, x,htol=1e-6):
-        return np.zeros(self.var.B0.shape[1]), 0
+    def apply_adjoint_hessian_22(self, u, v, x, htol=1e-6):
+        return np.zeros(self.var.B0.shape[1]), 0.0
 
-    def evaluate_nonlinearity(self, uh, pt=None):
-      ## quadrature points and weights
-      (lamb,weight) = quadpts(7)
-      nQuad = lamb.shape[0]
-      elem = self.var.mesh.t
-      node = self.var.mesh.p
 
-      ## assemble nonlinearities
-      fn  = np.zeros((self.var.NT,3))
-      Dfn = np.zeros((self.var.NT,3,3))
-      if pt is not None:
-        ph   = np.zeros(self.var.mesh.p.shape[0],)
-        ph[self.var.FreeNodes] = pt
-        DDfn = np.zeros((self.var.NT, 3, 3))
-      else:
-        DDfn = None
-      for p in range(0, nQuad):
-          #evaluate uh at quadrature point
-          uhp = uh[elem[:,0]]*lamb[p,0] + uh[elem[:,1]]*lamb[p,1] + uh[elem[:,2]]*lamb[p,2]
-          if pt is not None:
-            php = ph[elem[:,0]]*lamb[p,0] + ph[elem[:,1]]*lamb[p,1] + ph[elem[:,2]]*lamb[p,2]
 
-          (non,dnon, ddnon) = self.var.nonlin(uhp)
-          for i in range(0,3):
-              for j in range(0,3):
-                  Dfn[:,i,j] += self.var.area*weight[p]*dnon*lamb[p,j]*lamb[p,i]
-                  if pt is not None:
-                      DDfn[:, i, j] += self.var.area * weight[p] * ddnon * php * lamb[p, j] * lamb[p,i]
-              fn[:,i] += self.var.area*weight[p]*non*lamb[p,i]
 
-      Newt = np.zeros((self.var.Ndof,))
-      DNewt = sparse([], [], [], self.var.N,self.var.N)
-      if pt is not None:
-          DDNewt = sparse([], [], [], self.var.N, self.var.N)
-      else:
-          DDNewt = None
-      for i in range(0,3):
-          krow = elem[:,i]
-          for j in range(0,3):
-              kcol = elem[:,j]
-              DNewt += sparse(krow,kcol,Dfn[:,i,j],self.var.N,self.var.N)
-              if pt is not None:
-                  DDNewt += sparse(krow, kcol, DDfn[:, i, j], self.var.N, self.var.N)
-      # Newt +=  accumarray(elem(:),fn(:),[Ndof,1]);
-      temp = np.bincount(elem.reshape(np.prod(elem.shape)), weights=fn.reshape(np.prod(fn.shape))).T
-      Newt +=  temp #vectorize elem and fn
-      return Newt, DNewt, DDNewt
 
 
 
@@ -1612,7 +2070,89 @@ def plot_compare_single_vs_double(n):
     plt.show()
 
 
-import time
+def plot_obj_convergence(cnt, label=None):
+    
+    F = np.array(cnt['objhist'], dtype=float)
+    Fstar = F[-1]
+    it = np.arange(len(F))
+
+    plt.figure()
+    plt.semilogy(it, F - Fstar + 1e-16, linewidth=2)
+    plt.xlabel('TR Iteration k')
+    plt.ylabel(r'$F(x_k) - F^\star$')
+    if label:
+        plt.title(label)
+    plt.grid(True, which='both', alpha=0.4)
+    plt.tight_layout()
+    
+def plot_stationarity(cnt, label=None):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    g = np.array(cnt['gnormhist'], dtype=float)
+    it = np.arange(len(g))
+
+    plt.figure()
+    plt.semilogy(it, g + 1e-30, linewidth=2)
+    plt.xlabel('TR Iteration k')
+    plt.ylabel(r'$\|g_k\|_\mathrm{prox}$')
+    if label:
+        plt.title(label)
+    plt.grid(True, which='both', alpha=0.4)
+    plt.tight_layout()
+def plot_radius(cnt, label=None):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    d = np.array(cnt['deltahist'], dtype=float)
+    it = np.arange(len(d))
+
+    plt.figure()
+    plt.plot(it, d, linewidth=2)
+    plt.xlabel('TR Iteration k')
+    plt.ylabel(r'$\Delta_k$')
+    if label:
+        plt.title(label)
+    plt.grid(True, alpha=0.4)
+    plt.tight_layout()
+
+
+def plot_convergence_summary_single(cnt, label="Recursive TR (n=256)"):
+    """
+    Plot objective gap, stationarity norm, and trust-region radius
+    in a single 3-panel figure.
+    """
+    # Extract histories
+    F = np.array(cnt.get("objhist", []), dtype=float)
+    g = np.array(cnt.get("gnormhist", []), dtype=float)
+    d = np.array(cnt.get("deltahist", []), dtype=float)
+    it = np.arange(len(F))
+    
+    # Reference final value
+    Fstar = F[-1] if len(F) > 0 else 0.0
+    
+    # Create figure
+    fig, axs = plt.subplots(3, 1, figsize=(6.5, 7.5), sharex=True)
+    
+    # --- (1) Objective gap ---
+    axs[0].semilogy(it, np.maximum(F - Fstar, 1e-16), linewidth=2)
+    axs[0].set_ylabel(r"$F(x_k) - F^\star$")
+    axs[0].grid(True, which="both", alpha=0.4)
+    axs[0].set_title(label, fontsize=12, fontweight='bold')
+    
+    # --- (2) Stationarity norm ---
+    axs[1].semilogy(it, g + 1e-30, linewidth=2, color='tab:orange')
+    axs[1].set_ylabel(r"$\|g_k\|_\mathrm{prox}$")
+    axs[1].grid(True, which="both", alpha=0.4)
+    
+    # --- (3) Trust-region radius ---
+    axs[2].plot(it, d, linewidth=2, color='tab:green')
+    axs[2].set_xlabel("TR iteration $k$")
+    axs[2].set_ylabel(r"$\Delta_k$")
+    axs[2].grid(True, alpha=0.4)
+    
+    plt.tight_layout(h_pad=1.5)
+    plt.show()
+
+
 from matplotlib.patches import Patch
 def add_hyperparam_legend(ax, alpha_val, beta_val):
     label = rf"$\alpha={alpha_val}$, $\beta={beta_val}$"
@@ -1624,23 +2164,24 @@ def add_hyperparam_legend(ax, alpha_val, beta_val):
                     frameon=True)
     leg.get_frame().set_alpha(0.9)
 
-def driver(savestats=True, name="semilinear_control_2d"):
+def driver(meshlist, savestats=True, name="semilinear_control_2d"):
     print("2D Driver started")
     np.random.seed(0)
 
     # Problem parameters
-    n = 128 # 32x32 grid
+    #n = 128 # 32x32 grid
     alpha = 1e-4
     beta = 1e-2
     #meshlist = [n]
-    
-    meshlist = [n,n//2]
+    n = meshlist[0]
+    #meshlist = [n,n//2]
     problems = []
+    shared_rng = np.random.default_rng(seed=12345)
 
 
 
     for i in range(len(meshlist)):
-        S = SemilinearSetup2D(meshlist[i],alpha,beta, 1)
+        S = SemilinearSetup2D(n=meshlist[i],alpha=alpha,beta=beta, ctrl=1, noise_sigma=0.5,rng=shared_rng)
 
         if i < len(meshlist)-1:
             R = restriction_R_2d(meshlist[i+1],meshlist[i])
@@ -1657,19 +2198,30 @@ def driver(savestats=True, name="semilinear_control_2d"):
 
 
     dim = 2*n*n
-    x0 = np.zeros(dim)
+    #rng = np.random.default_rng(seed=123)
+    #x0 = np.zeros(dim)
+    #x0 = 0.1*rng.normal(size=dim)
+    ys = np.linspace(0, 1, n)
+    xs = np.linspace(0, 1, n)
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    z0 = np.sin(2*np.pi*X) * np.sin(2*np.pi*Y)
+    z0 = z0.ravel()  # control part
+    y0 = np.zeros_like(z0)  # state part
+    x0 = np.concatenate([y0, z0])
 
 
     params = set_default_parameters("SPG2")
     params.update({
         "reltol": False,
+        "use_abs_dim_term": False,
         "t": 2/alpha,
         "ocScale":1/alpha,
         "maxiter":200,
         "verbose":True,
         "useReduced":False,
-        "gtol":1e-7,
-        "RgnormScale":0.05, # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
+        "gtol":1e-6,
+        "gtol_gate": 1e-6,
+        "RgnormScale":0.01, # is v in Rgnorm >= v^i*gtol -> absolute R-step flag
         "RgnormScaleTol": 0.1,
         "debug_drop_gate":True,
         "debug_h_equiv":True,
@@ -1678,7 +2230,9 @@ def driver(savestats=True, name="semilinear_control_2d"):
         "min_drop_cap":1e-8,
         'deltamax': 1e4,
         'gamma2': 2.0,
-        'eta2':0.95
+        'eta2':0.95,
+        "maxit":100,
+        "verbose_child_debug":True
         })
     # Solve optimization problem
     start_time = time.time()
@@ -1710,6 +2264,12 @@ def driver(savestats=True, name="semilinear_control_2d"):
     ax.plot_trisurf(X1, X2, c_plot, triangles=triangles, cmap='viridis')
     plt.title("Target State $y_d$")
 
+    
+    #c = var.uD
+    #c[var.FreeNodes] = var.c
+    #ax = fig.add_subplot(131, projection='3d')
+    #ax.plot_trisurf(X1, X2, c, cmap='viridis')
+    #plt.title("Target State $y_d$")
 
     ax = fig.add_subplot(132, projection='3d')
     ax.plot_trisurf(X1, X2, optimal_state, cmap='viridis')
@@ -1728,3 +2288,115 @@ def driver(savestats=True, name="semilinear_control_2d"):
     
 
     return x_opt, cnt_tr
+
+
+
+
+
+def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
+    """
+    Compare multiple runs (e.g. 1-level vs 2-level) on:
+      1. objective gap F(x_k)-F*
+      2. prox-stationarity norm ||g||_prox
+      3. trust-region radius Δ_k
+
+    Parameters
+    ----------
+    run_data : list of dict-like
+        Each element is a dict with:
+            {
+              "cnt": cnt_tr,             # output counter dict from trustregion()
+              "label": "2-level",        # legend label
+              "color": "tab:blue",       # (optional) matplotlib color
+              "ls": "-",                 # (optional) line style
+            }
+        Only "cnt" and "label" are required.
+
+    title : str
+        Title for the whole figure.
+    """
+
+    fig, axs = plt.subplots(3, 1, figsize=(6.5, 7.5), sharex=True)
+
+    # loop over runs
+    for run in run_data:
+        cnt   = run["cnt"]
+        label = run.get("label", "run")
+        color = run.get("color", None)
+        ls    = run.get("ls", "-")
+
+        F = np.array(cnt.get("objhist", []), dtype=float)
+        g = np.array(cnt.get("gnormhist", []), dtype=float)
+        d = np.array(cnt.get("deltahist", []), dtype=float)
+        it = np.arange(len(F))
+
+        if len(F) == 0:
+            continue
+
+        Fstar = F[-1]
+
+        # (1) objective gap
+        axs[0].semilogy(it,
+                        np.maximum(F - Fstar, 1e-16),
+                        linewidth=2,
+                        label=label,
+                        color=color,
+                        ls=ls)
+
+        # (2) stationarity norm
+        axs[1].semilogy(it,
+                        g + 1e-30,
+                        linewidth=2,
+                        label=label,
+                        color=color,
+                        ls=ls)
+
+        # (3) trust-region radius
+        axs[2].plot(it,
+                    d,
+                    linewidth=2,
+                    label=label,
+                    color=color,
+                    ls=ls)
+
+    # --- cosmetics / labels ---
+    axs[0].set_ylabel(r"$F(x_k) - F^\star$")
+    axs[0].grid(True, which="both", alpha=0.4)
+    axs[0].set_title(title, fontsize=12, fontweight='bold')
+    axs[0].legend(loc="best", fontsize=9)
+
+    axs[1].set_ylabel(r"$\|g_k\|_\mathrm{prox}$")
+    axs[1].grid(True, which="both", alpha=0.4)
+    axs[1].legend(loc="best", fontsize=9)
+
+    axs[2].set_xlabel(r"TR iteration $k$")
+    axs[2].set_ylabel(r"$\Delta_k$")
+    axs[2].grid(True, alpha=0.4)
+    axs[2].legend(loc="best", fontsize=9)
+
+    plt.tight_layout(h_pad=1.5)
+    plt.show()
+
+
+
+
+    
+    
+    
+
+#plot_obj_convergence(cnt_tr, label="Recursive TR (n=2128)")
+#plot_stationarity(cnt_tr, label="Recursive TR (n=128)")
+#plot_radius(cnt_tr, label="Trust-Region Radius Evolution (n=256)")
+n = 256
+meshlist1 = [n]
+meshlist2 = [n,n//2]
+#meshlist3 = [n,n//2,n//4]
+x_opt1,cnt_tr1 = driver(meshlist1)
+x_opt2,cnt_tr2 = driver(meshlist2)
+#x_opt3,cnt_tr3 = driver(meshlist3)
+#plot_convergence_summary(cnt_tr, label="Recursive nonsmooth TR (n=128)")
+plot_convergence_summary([
+    {"cnt": cnt_tr1, "label": "1-level (fine only)", "color": "tab:blue", "ls": "-"},
+    {"cnt": cnt_tr2, "label": "2-level",             "color": "tab:orange", "ls": "--"},
+    #{"cnt": cnt_tr3, "label": "3-level",             "color": "tab:green", "ls": ":"},
+], title="Convergence vs hierarchy depth (n=256)")
