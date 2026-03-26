@@ -1,2 +1,2 @@
-In the main_lm Folder, We use the trust-region Levenberg--Marquadt method to train a neural network, which is used to solve the poisson equations.
-Could easily run main.lm/test.py to get the 1d and 2d test. Could change the real_solution there.
+In this file, we construct a recursive multilevel trust region algorithm to solve the nonsmooth optimization problem, more preciously, we want to solve the optimization problem which could be written as a smooth function f (could be nonconvex) plus a nonsmooth convex function phi. All the theory and details could be found in A multilevel proximal trust-region method for nonsmooth optimization with applications, arXiv:2512.00538
+
