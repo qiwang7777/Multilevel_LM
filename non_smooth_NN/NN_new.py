@@ -3719,6 +3719,7 @@ def adam_warmstart(nnset, var, steps=1000, lr=1e-3, batch=4096,
 def driver(NN_dim_coarse,savestats, name):
     print("driver started")
     np.random.seed(0)
+    torch.manual_seed(0)
 
     # settings
     n               = [30, 30]
