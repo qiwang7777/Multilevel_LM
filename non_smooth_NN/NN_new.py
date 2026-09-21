@@ -12,7 +12,15 @@ import collections, math, torch, time
 from collections import OrderedDict
 import torch.nn as nn
 
-
+plt.rcParams.update({
+    "text.usetex": False,
+    "font.family": "serif",
+    "font.serif": ["DejaVu Serif"],
+    "font.size": 14,
+    "axes.labelsize": 14,
+    "axes.titlesize": 14,
+    "legend.fontsize": 12,
+})
 
 
 class modelTR:
