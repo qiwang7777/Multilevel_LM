@@ -4019,14 +4019,14 @@ def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
 
     # Cosmetics
     axs[0].set_ylabel(r"$f+\phi$")
-    #axs[0].grid(True, which="both", alpha=0.4)
+    axs[0].grid(True, which="both", alpha=0.4)
     axs[0].set_title(title, fontweight='bold')
     axs[0].legend(loc="best")
     axs[0].set_xlabel(r"TR iteration $k$")
 
     axs[1].set_ylabel(r"stationarity from fine level")
     axs[1].set_title("stationarity vs hierarchy depth", fontweight='bold')
-    #axs[1].grid(True, which="both", alpha=0.4)
+    axs[1].grid(True, which="both", alpha=0.4)
     axs[1].legend(loc="best")
 
     axs[1].set_xlabel(r"TR iteration $k$")
