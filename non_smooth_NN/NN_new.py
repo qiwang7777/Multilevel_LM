@@ -3980,7 +3980,7 @@ def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
                 out.append(float(x))
         return np.array(out, dtype=float)
 
-    fig, axs = plt.subplots(2, 1, figsize=(6.5, 7.5), sharex=True)
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
 
     for run in run_data:
         label = run.get("label", "run")
