@@ -16,6 +16,7 @@ plt.rcParams.update({
     "text.usetex": False,
     "font.family": "serif",
     "font.serif": ["DejaVu Serif"],
+    "mathtext.fontset": "dejavuserif",
     "font.size": 14,
     "axes.labelsize": 14,
     "axes.titlesize": 14,
