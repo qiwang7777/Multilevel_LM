@@ -4002,10 +4002,7 @@ def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
 
         # safely convert to numpy arrays
         F_hist = to_numpy_safe(cnt_tr.get("objhist", []))
-        s_hist = to_numpy_safe(cnt_tr.get("snormhist", []))
-        #d_hist = to_numpy_safe(cnt_tr.get("deltahist", []))
-        if len(s_hist) == 0:
-            s_hist = to_numpy_safe(cnt_tr.get("gnormhist", []))
+        g_hist = to_numpy_safe(cnt_tr.get("gnormhist", []))
 
         it = np.arange(len(F_hist))
         if len(F_hist) == 0:
@@ -4018,8 +4015,9 @@ def plot_convergence_summary(run_data, title="Convergence vs hierarchy depth"):
                         linewidth=2, label=label, color=color, ls=ls)
 
         # 2) prox-stationarity norm
-        if len(s_hist) > 0:
-            axs[1].semilogy(it, s_hist + 1e-30,
+        if len(g_hist) > 0:
+            it_g = np.arange(len(g_hist))
+            axs[1].semilogy(it, g_hist + 1e-30,
                             linewidth=2, label=label, color=color, ls=ls)
 
         # 3) trust-region radius
